@@ -148,10 +148,6 @@ func (cmd *readCommand) handleUdfError(resultCode ResultCode) error {
 	return NewAerospikeError(resultCode)
 }
 
-type lazyMapUnpacker struct {
-	*unpacker
-}
-
 func (cmd *readCommand) parseRecord(
 	ifc command,
 	opCount int,
@@ -195,7 +191,7 @@ func (cmd *readCommand) parseRecord(
 			// we need to make a copy as the buffer is reused
 			b := make([]byte, particleBytesSize)
 			copy(b, cmd.dataBuffer[receiveOffset:receiveOffset+particleBytesSize])
-			value = &lazyMapUnpacker{newUnpacker(b, 0, particleBytesSize)}
+			value = newUnpacker(b, 0, particleBytesSize)
 		} else {
 			value, _ = bytesToParticle(particleType, cmd.dataBuffer, receiveOffset, particleBytesSize)
 		}
