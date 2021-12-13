@@ -1717,6 +1717,9 @@ func (cmd *baseCommand) execute(ifc command, isRead bool) error {
 		// set command node, so when you return a record it has the node
 		cmd.node, err = ifc.getNode(ifc)
 		if cmd.node == nil || !cmd.node.IsActive() || err != nil {
+			if err == nil {
+				err = NewAerospikeError(INVALID_NODE_ERROR, "Node not found/not active for partition")
+			}
 			// Node is currently inactive. Retry.
 			continue
 		}
