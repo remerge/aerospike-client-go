@@ -19,6 +19,8 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/rcrowley/go-metrics"
+
 	. "github.com/aerospike/aerospike-client-go/types"
 	xrand "github.com/aerospike/aerospike-client-go/types/rand"
 	Buffer "github.com/aerospike/aerospike-client-go/utils/buffer"
@@ -167,6 +169,8 @@ func (cmd *baseMultiCommand) readBytes(length int) (err error) {
 	if length > MaxBufferSize || length < 0 {
 		return NewAerospikeError(PARSE_ERROR, fmt.Sprintf("Invalid readBytes length: %d", length))
 	}
+
+	metrics.GetOrRegisterCounter("as_client track_kafka", nil),.Inc(1)
 
 	cmd.dataBuffer, err = cmd.bc.read(length)
 	if err != nil {
