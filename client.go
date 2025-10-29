@@ -743,6 +743,28 @@ func (clnt *Client) Get(policy *BasePolicy, key *Key, binNames ...string) (*Reco
 	return command.GetRecord(), nil
 }
 
+// Like Get but does not deserialize bins containing a map
+func (clnt *Client) GetLazy(policy *BasePolicy, key *Key, binNames ...string) (*Record, error) {
+	policy = clnt.getUsablePolicy(policy)
+
+	if policy.Txn != nil {
+		if err := policy.Txn.prepareRead(key.namespace); err != nil {
+			return nil, err
+		}
+	}
+
+	command, err := newReadCommand(clnt.cluster, policy, key, binNames)
+	if err != nil {
+		return nil, err
+	}
+	command.lazy = true
+
+	if err := command.Execute(); err != nil {
+		return nil, err
+	}
+	return command.GetRecord(), nil
+}
+
 // GetHeader reads a record generation and expiration only for specified key.
 // Bins are not read.
 // The policy can be used to specify timeouts.

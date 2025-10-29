@@ -32,6 +32,7 @@ type baseReadCommand struct {
 	object *reflect.Value
 
 	replicaSequence int
+	lazy            bool
 }
 
 // this method uses reflection.

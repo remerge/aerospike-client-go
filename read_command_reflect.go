@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/aerospike/aerospike-client-go/v8/types"
+	ParticleType "github.com/aerospike/aerospike-client-go/v8/types/particle_type"
 	Buffer "github.com/aerospike/aerospike-client-go/v8/utils/buffer"
 )
 
@@ -84,7 +85,15 @@ func parseObject(
 			brc.dataOffset += 4 + 4 + nameSize
 
 			particleBytesSize := opSize - (4 + nameSize)
-			value, _ := bytesToParticle(particleType, brc.dataBuffer, brc.dataOffset, particleBytesSize)
+			var value interface{}
+			if brc.lazy && particleType == ParticleType.MAP {
+				// we need to make a copy as the buffer is reused
+				b := make([]byte, particleBytesSize)
+				copy(b, brc.dataBuffer[brc.dataOffset:brc.dataOffset+particleBytesSize])
+				value = newUnpacker(b, 0, particleBytesSize)
+			} else {
+				value, _ = bytesToParticle(particleType, brc.dataBuffer, brc.dataOffset, particleBytesSize)
+			}
 			if err := setObjectField(mappings, iobj, name, value); err != nil {
 				return err
 			}
