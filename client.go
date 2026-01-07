@@ -1187,6 +1187,11 @@ func (clnt *Client) RegisterUDF(policy *WritePolicy, udfBody []byte, serverPath 
 	policy = clnt.getUsableWritePolicy(policy)
 	content := base64.StdEncoding.EncodeToString(udfBody)
 
+	node, err := clnt.cluster.GetRandomNode()
+	if err != nil {
+		return nil, err
+	}
+
 	var strCmd bytes.Buffer
 	// errors are to remove errcheck warnings
 	// they will always be nil as stated in golang docs
@@ -1201,13 +1206,13 @@ func (clnt *Client) RegisterUDF(policy *WritePolicy, udfBody []byte, serverPath 
 	strCmd.WriteString(";")
 
 	// Send UDF to one node. That node will distribute the UDF to other nodes.
-	responseMap, err := clnt.sendInfoCommand(policy.TotalTimeout, strCmd.String())
+	responseMap, err := clnt.sendInfoCommand(node, policy.TotalTimeout, strCmd.String())
 	if err != nil {
 		return nil, err
 	}
 
 	response := responseMap[strCmd.String()]
-	if strings.EqualFold(response, "ok") {
+	if strings.EqualFold(response, "ok") || response == "" {
 		return NewRegisterTask(clnt.cluster, serverPath), nil
 	}
 
@@ -1243,6 +1248,12 @@ func (clnt *Client) RegisterUDF(policy *WritePolicy, udfBody []byte, serverPath 
 // If the policy is nil, the default relevant policy will be used.
 func (clnt *Client) RemoveUDF(policy *WritePolicy, udfName string) (*RemoveTask, Error) {
 	policy = clnt.getUsableWritePolicy(policy)
+
+	node, err := clnt.cluster.GetRandomNode()
+	if err != nil {
+		return nil, err
+	}
+
 	var strCmd bytes.Buffer
 	// errors are to remove errcheck warnings
 	// they will always be nil as stated in golang docs
@@ -1251,7 +1262,7 @@ func (clnt *Client) RemoveUDF(policy *WritePolicy, udfName string) (*RemoveTask,
 	strCmd.WriteString(";")
 
 	// Send command to one node. That node will distribute it to other nodes.
-	responseMap, err := clnt.sendInfoCommand(policy.TotalTimeout, strCmd.String())
+	responseMap, err := clnt.sendInfoCommand(node, policy.TotalTimeout, strCmd.String())
 	if err != nil {
 		return nil, err
 	}
@@ -1269,13 +1280,18 @@ func (clnt *Client) RemoveUDF(policy *WritePolicy, udfName string) (*RemoveTask,
 func (clnt *Client) ListUDF(policy *BasePolicy) ([]*UDF, Error) {
 	policy = clnt.getUsablePolicy(policy)
 
+	node, err := clnt.cluster.GetRandomNode()
+	if err != nil {
+		return nil, err
+	}
+
 	var strCmd bytes.Buffer
 	// errors are to remove errcheck warnings
 	// they will always be nil as stated in golang docs
 	strCmd.WriteString("udf-list")
 
 	// Send command to one node. That node will distribute it to other nodes.
-	responseMap, err := clnt.sendInfoCommand(policy.TotalTimeout, strCmd.String())
+	responseMap, err := clnt.sendInfoCommand(node, policy.TotalTimeout, strCmd.String())
 	if err != nil {
 		return nil, err
 	}
@@ -1391,7 +1407,7 @@ func (clnt *Client) QueryExecute(policy *QueryPolicy,
 
 	var errs Error
 	for i := range nodes {
-		command := newServerCommand(nodes[i], policy, writePolicy, statement, ops)
+		command := newServerCommand(nodes[i], policy, writePolicy, statement, taskId, ops)
 		if err := command.Execute(); err != nil {
 			errs = chainErrors(err, errs)
 		}
@@ -1426,7 +1442,7 @@ func (clnt *Client) ExecuteUDF(policy *QueryPolicy,
 
 	var errs Error
 	for i := range nodes {
-		command := newServerCommand(nodes[i], policy, nil, statement, nil)
+		command := newServerCommand(nodes[i], policy, nil, statement, taskId, nil)
 		if err := command.Execute(); err != nil {
 			errs = chainErrors(err, errs)
 		}
@@ -1459,7 +1475,7 @@ func (clnt *Client) ExecuteUDFNode(policy *QueryPolicy,
 
 	statement.SetAggregateFunction(packageName, functionName, functionArgs, false)
 
-	command := newServerCommand(node, policy, nil, statement, nil)
+	command := newServerCommand(node, policy, nil, statement, taskId, nil)
 	err := command.Execute()
 
 	return NewExecuteTask(clnt.cluster, statement, taskId), err
@@ -1470,6 +1486,11 @@ func (clnt *Client) ExecuteUDFNode(policy *QueryPolicy,
 // Pass nil as filter to remove the current filter on the server.
 func (clnt *Client) SetXDRFilter(policy *InfoPolicy, datacenter string, namespace string, filter *Expression) Error {
 	policy = clnt.getUsableInfoPolicy(policy)
+
+	node, err := clnt.cluster.GetRandomNode()
+	if err != nil {
+		return err
+	}
 
 	var strCmd string
 	if filter == nil {
@@ -1484,7 +1505,7 @@ func (clnt *Client) SetXDRFilter(policy *InfoPolicy, datacenter string, namespac
 	}
 
 	// Send command to one node. That node will distribute it to other nodes.
-	responseMap, err := clnt.sendInfoCommand(policy.Timeout, strCmd)
+	responseMap, err := clnt.sendInfoCommand(node, policy.Timeout, strCmd)
 	if err != nil {
 		return err
 	}
@@ -1710,9 +1731,19 @@ func (clnt *Client) createIndex(policy *WritePolicy,
 	ctx ...*CDTContext,
 ) (*IndexTask, Error) {
 	policy = clnt.getUsableWritePolicy(policy)
+	node, err := clnt.cluster.GetRandomNode()
+	if err != nil {
+		return nil, err
+	}
+
+	serverVersion := node.GetServerVersion()
+	createIndexCommand := types.Ternary(
+		serverVersion.IsGreaterOrEqual(internal.ServerVersion_8_1),
+		"sindex-create:namespace=",
+		"sindex-create:ns=")
 
 	var strCmd bytes.Buffer
-	strCmd.WriteString("sindex-create:ns=")
+	strCmd.WriteString(createIndexCommand)
 	strCmd.WriteString(namespace)
 
 	if len(setName) > 0 {
@@ -1759,16 +1790,22 @@ func (clnt *Client) createIndex(policy *WritePolicy,
 	}
 
 	if binName != "" {
-		strCmd.WriteString(";indexdata=")
-		strCmd.WriteString(binName)
-		strCmd.WriteString(",")
+		if serverVersion.IsGreaterOrEqual(internal.ServerVersion_8_1) {
+			strCmd.WriteString(";bin=")
+			strCmd.WriteString(binName)
+			strCmd.WriteString(";type=")
+		} else {
+			strCmd.WriteString(";indexdata=")
+			strCmd.WriteString(binName)
+			strCmd.WriteString(",")
+		}
 	} else {
 		strCmd.WriteString(";type=")
 	}
 
 	strCmd.WriteString(string(indexType))
 	// Send index command to one node. That node will distribute the command to other nodes.
-	responseMap, err := clnt.sendInfoCommand(policy.TotalTimeout, strCmd.String())
+	responseMap, err := clnt.sendInfoCommand(node, policy.TotalTimeout, strCmd.String())
 	if err != nil {
 		return nil, err
 	}
@@ -1792,8 +1829,20 @@ func (clnt *Client) DropIndex(
 	indexName string,
 ) Error {
 	policy = clnt.getUsableWritePolicy(policy)
+
+	node, err := clnt.cluster.GetRandomNode()
+	if err != nil {
+		return err
+	}
+
+	serverVersion := node.GetServerVersion()
+	deleteIndexCommand := types.Ternary(
+		serverVersion.IsGreaterOrEqual(internal.ServerVersion_8_1),
+		"sindex-delete:namespace=",
+		"sindex-delete:ns=")
+
 	var strCmd bytes.Buffer
-	strCmd.WriteString("sindex-delete:ns=")
+	strCmd.WriteString(deleteIndexCommand)
 	strCmd.WriteString(namespace)
 
 	if len(setName) > 0 {
@@ -1804,7 +1853,7 @@ func (clnt *Client) DropIndex(
 	strCmd.WriteString(indexName)
 
 	// Send index command to one node. That node will distribute the command to other nodes.
-	responseMap, err := clnt.sendInfoCommand(policy.TotalTimeout, strCmd.String())
+	responseMap, err := clnt.sendInfoCommand(node, policy.TotalTimeout, strCmd.String())
 	if err != nil {
 		return err
 	}
@@ -1835,6 +1884,11 @@ func (clnt *Client) DropIndex(
 func (clnt *Client) Truncate(policy *InfoPolicy, namespace, set string, beforeLastUpdate *time.Time) Error {
 	policy = clnt.getUsableInfoPolicy(policy)
 
+	node, err := clnt.cluster.GetRandomNode()
+	if err != nil {
+		return err
+	}
+
 	var strCmd bytes.Buffer
 	if len(set) > 0 {
 		strCmd.WriteString("truncate:namespace=")
@@ -1850,7 +1904,7 @@ func (clnt *Client) Truncate(policy *InfoPolicy, namespace, set string, beforeLa
 		strCmd.WriteString(strconv.FormatInt(beforeLastUpdate.UnixNano(), 10))
 	}
 
-	responseMap, err := clnt.sendInfoCommand(policy.Timeout, strCmd.String())
+	responseMap, err := clnt.sendInfoCommand(node, policy.Timeout, strCmd.String())
 	if err != nil {
 		return err
 	}
@@ -1883,12 +1937,10 @@ func (clnt *Client) CreateUser(policy *AdminPolicy, user string, password string
 		return err
 	}
 
-	node.usingTendConn(policy.Timeout, func(conn *Connection) {
+	return node.usingTendConn(policy.Timeout, func(conn *Connection) Error {
 		command := NewAdminCommand(nil)
-		err = command.createUser(conn, policy, user, hash, roles)
+		return command.createUser(conn, policy, user, hash, roles)
 	})
-
-	return err
 }
 
 // CreatePKIUser creates a new user PKI user with roles. PKI users are authenticated via TLS and a certificate instead of a password.
@@ -1908,17 +1960,17 @@ func (clnt *Client) CreatePKIUser(policy *AdminPolicy, user string, roles []stri
 	if err != nil {
 		return err
 	}
+
+	serverVersion := node.GetServerVersion()
 	// Check server version to ensure it supports PKI users.
-	if node.version.IsSmaller(serverMinVersion) {
-		return newCommonError(nil, fmt.Sprintf("Node version %s is less than required minimum version %s", node.version.String(), serverMinVersion))
+	if serverVersion.IsSmaller(serverMinVersion) {
+		return newCommonError(nil, fmt.Sprintf("Node version %s is less than required minimum version %s", serverVersion.String(), serverMinVersion))
 	}
 
-	node.usingTendConn(policy.Timeout, func(conn *Connection) {
+	if err := node.usingTendConn(policy.Timeout, func(conn *Connection) Error {
 		command := NewAdminCommand(nil)
-		err = command.createUser(conn, policy, user, hash, roles)
-	})
-
-	if err != nil {
+		return command.createUser(conn, policy, user, hash, roles)
+	}); err != nil {
 		return newError(err.resultCode(), fmt.Sprintf("PKI user creation failed: %s", err.Error()))
 	}
 
@@ -1935,11 +1987,10 @@ func (clnt *Client) DropUser(policy *AdminPolicy, user string) Error {
 		return err
 	}
 
-	node.usingTendConn(policy.Timeout, func(conn *Connection) {
+	return node.usingTendConn(policy.Timeout, func(conn *Connection) Error {
 		command := NewAdminCommand(nil)
-		err = command.dropUser(conn, policy, user)
+		return command.dropUser(conn, policy, user)
 	})
-	return err
 }
 
 // ChangePassword changes a user's password. Clear-text password will be hashed using bcrypt before sending to server.
@@ -1961,23 +2012,21 @@ func (clnt *Client) ChangePassword(policy *AdminPolicy, user string, password st
 		return err
 	}
 
-	node.usingTendConn(policy.Timeout, func(conn *Connection) {
+	if err := node.usingTendConn(policy.Timeout, func(conn *Connection) Error {
 		command := NewAdminCommand(nil)
 
 		if user == clnt.cluster.user {
 			// Change own password.
-			err = command.changePassword(conn, policy, user, clnt.cluster.Password(), hash)
-		} else {
-			// Change other user's password by user admin.
-			err = command.setPassword(conn, policy, user, hash)
+			return command.changePassword(conn, policy, user, clnt.cluster.Password(), hash)
 		}
-	})
-
-	if err == nil {
-		clnt.cluster.changePassword(user, password, hash)
+		// Change other user's password by user admin.
+		return command.setPassword(conn, policy, user, hash)
+	}); err != nil {
+		return err
 	}
 
-	return err
+	clnt.cluster.changePassword(user, password, hash)
+	return nil
 }
 
 // GrantRoles adds roles to user's list of roles.
@@ -1990,11 +2039,10 @@ func (clnt *Client) GrantRoles(policy *AdminPolicy, user string, roles []string)
 		return err
 	}
 
-	node.usingTendConn(policy.Timeout, func(conn *Connection) {
+	return node.usingTendConn(policy.Timeout, func(conn *Connection) Error {
 		command := NewAdminCommand(nil)
-		err = command.grantRoles(conn, policy, user, roles)
+		return command.grantRoles(conn, policy, user, roles)
 	})
-	return err
 }
 
 // RevokeRoles removes roles from user's list of roles.
@@ -2007,12 +2055,10 @@ func (clnt *Client) RevokeRoles(policy *AdminPolicy, user string, roles []string
 		return err
 	}
 
-	node.usingTendConn(policy.Timeout, func(conn *Connection) {
+	return node.usingTendConn(policy.Timeout, func(conn *Connection) Error {
 		command := NewAdminCommand(nil)
-		err = command.revokeRoles(conn, policy, user, roles)
+		return command.revokeRoles(conn, policy, user, roles)
 	})
-
-	return err
 }
 
 // QueryUser retrieves roles for a given user.
@@ -2025,10 +2071,15 @@ func (clnt *Client) QueryUser(policy *AdminPolicy, user string) (res *UserRoles,
 		return nil, err
 	}
 
-	node.usingTendConn(policy.Timeout, func(conn *Connection) {
+	if errCall := node.usingTendConn(policy.Timeout, func(conn *Connection) Error {
 		command := NewAdminCommand(nil)
 		res, err = command.QueryUser(conn, policy, user)
-	})
+
+		return err
+	}); errCall != nil {
+		return nil, errCall
+	}
+
 	return res, err
 }
 
@@ -2042,10 +2093,15 @@ func (clnt *Client) QueryUsers(policy *AdminPolicy) (res []*UserRoles, err Error
 		return nil, err
 	}
 
-	node.usingTendConn(policy.Timeout, func(conn *Connection) {
+	if errCall := node.usingTendConn(policy.Timeout, func(conn *Connection) Error {
 		command := NewAdminCommand(nil)
 		res, err = command.QueryUsers(conn, policy)
-	})
+
+		return err
+	}); errCall != nil {
+		return nil, errCall
+	}
+
 	return res, err
 }
 
@@ -2059,10 +2115,15 @@ func (clnt *Client) QueryRole(policy *AdminPolicy, role string) (res *Role, err 
 		return nil, err
 	}
 
-	node.usingTendConn(policy.Timeout, func(conn *Connection) {
+	if errCall := node.usingTendConn(policy.Timeout, func(conn *Connection) Error {
 		command := NewAdminCommand(nil)
 		res, err = command.QueryRole(conn, policy, role)
-	})
+
+		return err
+	}); errCall != nil {
+		return nil, errCall
+	}
+
 	return res, err
 }
 
@@ -2076,10 +2137,15 @@ func (clnt *Client) QueryRoles(policy *AdminPolicy) (res []*Role, err Error) {
 		return nil, err
 	}
 
-	node.usingTendConn(policy.Timeout, func(conn *Connection) {
+	if errCall := node.usingTendConn(policy.Timeout, func(conn *Connection) Error {
 		command := NewAdminCommand(nil)
 		res, err = command.QueryRoles(conn, policy)
-	})
+
+		return err
+	}); errCall != nil {
+		return nil, errCall
+	}
+
 	return res, err
 }
 
@@ -2095,11 +2161,10 @@ func (clnt *Client) CreateRole(policy *AdminPolicy, roleName string, privileges 
 		return err
 	}
 
-	node.usingTendConn(policy.Timeout, func(conn *Connection) {
+	return node.usingTendConn(policy.Timeout, func(conn *Connection) Error {
 		command := NewAdminCommand(nil)
-		err = command.createRole(conn, policy, roleName, privileges, whitelist, readQuota, writeQuota)
+		return command.createRole(conn, policy, roleName, privileges, whitelist, readQuota, writeQuota)
 	})
-	return err
 }
 
 // DropRole removes a user-defined role.
@@ -2112,11 +2177,10 @@ func (clnt *Client) DropRole(policy *AdminPolicy, roleName string) Error {
 		return err
 	}
 
-	node.usingTendConn(policy.Timeout, func(conn *Connection) {
+	return node.usingTendConn(policy.Timeout, func(conn *Connection) Error {
 		command := NewAdminCommand(nil)
-		err = command.dropRole(conn, policy, roleName)
+		return command.dropRole(conn, policy, roleName)
 	})
-	return err
 }
 
 // GrantPrivileges grant privileges to a user-defined role.
@@ -2129,11 +2193,10 @@ func (clnt *Client) GrantPrivileges(policy *AdminPolicy, roleName string, privil
 		return err
 	}
 
-	node.usingTendConn(policy.Timeout, func(conn *Connection) {
+	return node.usingTendConn(policy.Timeout, func(conn *Connection) Error {
 		command := NewAdminCommand(nil)
-		err = command.grantPrivileges(conn, policy, roleName, privileges)
+		return command.grantPrivileges(conn, policy, roleName, privileges)
 	})
-	return err
 }
 
 // RevokePrivileges revokes privileges from a user-defined role.
@@ -2146,11 +2209,10 @@ func (clnt *Client) RevokePrivileges(policy *AdminPolicy, roleName string, privi
 		return err
 	}
 
-	node.usingTendConn(policy.Timeout, func(conn *Connection) {
+	return node.usingTendConn(policy.Timeout, func(conn *Connection) Error {
 		command := NewAdminCommand(nil)
-		err = command.revokePrivileges(conn, policy, roleName, privileges)
+		return command.revokePrivileges(conn, policy, roleName, privileges)
 	})
-	return err
 }
 
 // SetWhitelist sets IP address whitelist for a role. If whitelist is nil or empty, it removes existing whitelist from role.
@@ -2163,11 +2225,10 @@ func (clnt *Client) SetWhitelist(policy *AdminPolicy, roleName string, whitelist
 		return err
 	}
 
-	node.usingTendConn(policy.Timeout, func(conn *Connection) {
+	return node.usingTendConn(policy.Timeout, func(conn *Connection) Error {
 		command := NewAdminCommand(nil)
-		err = command.setWhitelist(conn, policy, roleName, whitelist)
+		return command.setWhitelist(conn, policy, roleName, whitelist)
 	})
-	return err
 }
 
 // SetQuotas sets maximum reads/writes per second limits for a role.  If a quota is zero, the limit is removed.
@@ -2182,11 +2243,10 @@ func (clnt *Client) SetQuotas(policy *AdminPolicy, roleName string, readQuota, w
 		return err
 	}
 
-	node.usingTendConn(policy.Timeout, func(conn *Connection) {
+	return node.usingTendConn(policy.Timeout, func(conn *Connection) Error {
 		command := NewAdminCommand(nil)
-		err = command.setQuotas(conn, policy, roleName, readQuota, writeQuota)
+		return command.setQuotas(conn, policy, roleName, readQuota, writeQuota)
 	})
-	return err
 }
 
 //-------------------------------------------------------
@@ -2286,12 +2346,7 @@ func (clnt *Client) WarmUp(count int) (int, Error) {
 // Internal Methods
 //-------------------------------------------------------
 
-func (clnt *Client) sendInfoCommand(timeout time.Duration, command string) (map[string]string, Error) {
-	node, err := clnt.cluster.GetRandomNode()
-	if err != nil {
-		return nil, err
-	}
-
+func (clnt *Client) sendInfoCommand(node *Node, timeout time.Duration, command string) (map[string]string, Error) {
 	policy := InfoPolicy{Timeout: timeout}
 	return node.RequestInfo(&policy, command)
 }
