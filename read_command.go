@@ -81,6 +81,10 @@ func (cmd *readCommand) parseResult(ifc command, conn *Connection) Error {
 			return nil
 		}
 
+		if cmd.lazy {
+			rp.lazy = true
+		}
+
 		var err Error
 		cmd.record, err = rp.parseRecord(cmd.key, cmd.isOperation)
 		if err != nil {

@@ -19,6 +19,7 @@ import (
 
 	"github.com/aerospike/aerospike-client-go/v8/logger"
 	"github.com/aerospike/aerospike-client-go/v8/types"
+	ParticleType "github.com/aerospike/aerospike-client-go/v8/types/particle_type"
 	Buffer "github.com/aerospike/aerospike-client-go/v8/utils/buffer"
 )
 
@@ -30,7 +31,8 @@ type recordParser struct {
 	fieldCount int
 	opCount    int
 
-	cmd *baseCommand
+	cmd  *baseCommand
+	lazy bool
 }
 
 // recordParser initializes task with fields needed to query server nodes.
@@ -175,7 +177,16 @@ func (rp *recordParser) parseRecord(key *Key, isOperation bool) (*Record, Error)
 		receiveOffset += 4 + 4 + nameSize
 
 		particleBytesSize := opSize - (4 + nameSize)
-		value, _ := bytesToParticle(particleType, rp.cmd.dataBuffer, receiveOffset, particleBytesSize)
+		var value interface{}
+		if rp.lazy && particleType == ParticleType.MAP {
+			// we need to make a copy as the buffer is reused
+			b := make([]byte, particleBytesSize)
+			copy(b, rp.cmd.dataBuffer[receiveOffset:receiveOffset+particleBytesSize])
+			value = newUnpacker(b, 0, particleBytesSize)
+		} else {
+			value, _ = bytesToParticle(particleType, rp.cmd.dataBuffer, receiveOffset, particleBytesSize)
+		}
+
 		receiveOffset += particleBytesSize
 
 		if bins == nil {
