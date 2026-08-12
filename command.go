@@ -238,6 +238,7 @@ type baseCommand struct {
 	// the buffer, this padding will be used to compress the command in-place,
 	// and then the compressed proto header will be written.
 	dataBufferCompress []byte
+	borrowedBuffer     []byte
 	// oneShot determines if streaming commands like query, scan or queryAggregate
 	// are not retried if they error out mid-parsing
 	oneShot bool
@@ -3531,6 +3532,7 @@ func (cmd *baseCommand) sizeBufferSz(size int, willCompress bool) Error {
 		cmd.conn.buffHist.Add(uint64(size))
 	}
 
+	cmd.borrowedBuffer = nil
 	if size <= len(cmd.dataBuffer) {
 		// don't touch the buffer
 		// this is a noop, here to silence the linters
@@ -3540,6 +3542,7 @@ func (cmd *baseCommand) sizeBufferSz(size int, willCompress bool) Error {
 	} else {
 		// not enough space
 		cmd.dataBuffer = buffPool.Get(size)
+		cmd.borrowedBuffer = cmd.dataBuffer
 	}
 
 	// The trick here to keep a ref to the buffer, and set the buffer itself
@@ -3602,11 +3605,16 @@ func (cmd *baseCommand) compress() Error {
 		// If not possible to reuse it, reallocate a buffer.
 		if compressedSz+msgHeaderPad > len(cmd.dataBufferCompress) {
 			// compression added to the size of the message
+			oldBorrowedBuffer := cmd.borrowedBuffer
 			buf := buffPool.Get(compressedSz + msgHeaderPad)
 			if n := copy(buf[msgHeaderPad:], b.Bytes()); n < compressedSz {
 				return newError(types.SERIALIZE_ERROR)
 			}
 			cmd.dataBufferCompress = buf
+			cmd.borrowedBuffer = buf
+			if len(oldBorrowedBuffer) > 0 {
+				buffPool.Put(oldBorrowedBuffer)
+			}
 		}
 
 		// Use compressed buffer if compression completed within original buffer size.
@@ -3675,11 +3683,11 @@ func (cmd *baseCommand) contextError() Error {
 }
 
 func (cmd *baseCommand) contextErrorFrom(err error) Error {
-	if contextErr := cmd.contextError(); contextErr != nil {
-		return contextErr
-	}
 	if cmd.ctx == nil || err == nil {
 		return nil
+	}
+	if cmd.ctx.Err() != nil && errors.Is(err, ErrTimeout) {
+		return newErrorAndWrap(cmd.ctx.Err(), types.TIMEOUT, "command canceled")
 	}
 	// Socket deadlines are set to the earlier of policy and context deadlines.
 	// The timer and the read deadline can race, so infer the context cause when
@@ -3709,6 +3717,42 @@ func (cmd *baseCommand) sleepBetweenRetries(interval time.Duration) Error {
 
 func (cmd *baseCommand) watchContext(conn *Connection) contextwatch.Watch {
 	return contextwatch.Start(cmd.ctx, conn.interruptIO)
+}
+
+func (cmd *baseCommand) releaseBorrowedBuffer() {
+	if len(cmd.borrowedBuffer) > 0 {
+		buffPool.Put(cmd.borrowedBuffer)
+		cmd.borrowedBuffer = nil
+	}
+}
+
+func (cmd *baseCommand) cleanupConnectionState() {
+	cmd.releaseBorrowedBuffer()
+	cmd.dataBuffer = nil
+	cmd.dataBufferCompress = nil
+	if cmd.conn != nil {
+		cmd.conn.dataBuffer = cmd.conn.origDataBuffer
+	}
+}
+
+func (cmd *baseCommand) closeConnection() {
+	if cmd.conn == nil {
+		cmd.cleanupConnectionState()
+		return
+	}
+	cmd.cleanupConnectionState()
+	cmd.conn.Close()
+	cmd.conn = nil
+}
+
+func (cmd *baseCommand) returnConnection(ifc command) {
+	if cmd.conn == nil {
+		cmd.cleanupConnectionState()
+		return
+	}
+	cmd.cleanupConnectionState()
+	ifc.putConnection(cmd.conn)
+	cmd.conn = nil
 }
 
 func (cmd *baseCommand) executeIter(ifc command, iter int) Error {
@@ -3744,7 +3788,7 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 		if (policy.MaxRetries <= 0 && cmd.commandSentCounter > 1) || (policy.MaxRetries > 0 && cmd.commandSentCounter > policy.MaxRetries) {
 			// A context may expire between the check above and this branch. Preserve
 			// cancellation identity instead of obscuring it behind MAX_RETRIES_EXCEEDED.
-			if contextErr := cmd.contextErrorFrom(err); contextErr != nil {
+			if contextErr := cmd.contextError(); contextErr != nil {
 				return contextErr.iter(cmd.commandSentCounter).setInDoubt(ifc.isRead(), cmd.commandSentCounter).setNode(cmd.node)
 			}
 			if cmd.node != nil && cmd.node.cluster != nil {
@@ -3866,14 +3910,12 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 			continue
 		}
 		if contextErr := cmd.contextError(); contextErr != nil {
-			cmd.conn.Close()
-			cmd.conn = nil
+			cmd.returnConnection(ifc)
 			return contextErr.iter(cmd.commandSentCounter).setInDoubt(ifc.isRead(), cmd.commandSentCounter).setNode(cmd.node)
 		}
 		if cmd.ctx != nil && !deadline.IsZero() {
 			if err = cmd.conn.SetTimeout(deadline, policy.SocketTimeout); err != nil {
-				cmd.conn.Close()
-				cmd.conn = nil
+				cmd.closeConnection()
 				return err.iter(cmd.commandSentCounter).setInDoubt(ifc.isRead(), cmd.commandSentCounter).setNode(cmd.node)
 			}
 		}
@@ -3886,9 +3928,8 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 
 		if err != nil {
 			applyTransactionErrorMetrics(cmd.node)
-			if contextErr := cmd.contextErrorFrom(err); contextErr != nil {
-				cmd.conn.Close()
-				cmd.conn = nil
+			if contextErr := cmd.contextError(); contextErr != nil {
+				cmd.returnConnection(ifc)
 				applyTransactionMetrics(cmd.node, ifc.commandType(), transStart)
 				return contextErr.iter(cmd.commandSentCounter).setInDoubt(ifc.isRead(), cmd.commandSentCounter).setNode(cmd.node)
 			}
@@ -3898,8 +3939,7 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 
 			// All runtime exceptions are considered fatal. Do not retry.
 			// Close socket to flush out possible garbage. Do not put back in pool.
-			cmd.conn.Close()
-			cmd.conn = nil
+			cmd.closeConnection()
 			applyTransactionMetrics(cmd.node, ifc.commandType(), transStart)
 			return err
 		}
@@ -3918,6 +3958,7 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 			// now that the deadline has been set in the buffer, compress the contents
 			if err = cmd.compress(); err != nil {
 				applyTransactionErrorMetrics(cmd.node)
+				cmd.closeConnection()
 				return chainErrors(err, errChain).iter(cmd.commandSentCounter).setNode(cmd.node).setInDoubt(ifc.isRead(), cmd.commandSentCounter)
 			}
 		}
@@ -3939,8 +3980,7 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 		if err != nil {
 			if contextErr := contextWatch.Finish(); contextErr != nil {
 				applyTransactionErrorMetrics(cmd.node)
-				cmd.conn.Close()
-				cmd.conn = nil
+				cmd.closeConnection()
 				applyTransactionMetrics(cmd.node, ifc.commandType(), transStart)
 				return newErrorAndWrap(contextErr, types.TIMEOUT, "command canceled").iter(cmd.commandSentCounter).setInDoubt(ifc.isRead(), cmd.commandSentCounter).setNode(cmd.node)
 			}
@@ -3955,11 +3995,12 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 			}
 			// try to salvage the connection
 			if cmd.conn.salvageConnection && policy.TimeoutDelay > 0 {
+				cmd.cleanupConnectionState()
 				go ifc.salvageConn(policy.TimeoutDelay, cmd.conn, cmd.node)
 			} else {
 				// IO errors are considered temporary anomalies. Retry.
 				// Close socket to flush out possible garbage. Do not put back in pool.
-				cmd.conn.Close()
+				cmd.closeConnection()
 			}
 
 			cmd.conn = nil
@@ -3979,22 +4020,14 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 		} else {
 			err = ifc.parseResult(ifc, cmd.conn)
 		}
-
-		if contextErr := contextWatch.Finish(); contextErr != nil {
-			applyTransactionErrorMetrics(cmd.node)
-			cmd.conn.Close()
-			cmd.conn = nil
-			applyTransactionMetrics(cmd.node, ifc.commandType(), transStart)
-			return newErrorAndWrap(contextErr, types.TIMEOUT, "command canceled").iter(cmd.commandSentCounter).setInDoubt(ifc.isRead(), cmd.commandSentCounter).setNode(cmd.node)
-		}
+		contextWatch.Finish()
 
 		if err != nil {
 			applyTransactionErrorMetrics(cmd.node)
-			if contextErr := cmd.contextErrorFrom(err); contextErr != nil {
-				cmd.conn.Close()
-				cmd.conn = nil
+			if canceledErr := cmd.contextErrorFrom(err); canceledErr != nil {
+				cmd.closeConnection()
 				applyTransactionMetrics(cmd.node, ifc.commandType(), transStart)
-				return contextErr.iter(cmd.commandSentCounter).setInDoubt(ifc.isRead(), cmd.commandSentCounter).setNode(cmd.node)
+				return canceledErr.iter(cmd.commandSentCounter).setInDoubt(ifc.isRead(), cmd.commandSentCounter).setNode(cmd.node)
 			}
 
 			// chain the errors
@@ -4011,12 +4044,14 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 
 				if cmd.conn.salvageConnection && policy.TimeoutDelay > 0 {
 					// Do not close connection immediately, but give it a chance to recover
+					cmd.cleanupConnectionState()
 					go ifc.salvageConn(policy.TimeoutDelay, cmd.conn, cmd.node)
+					cmd.conn = nil
 					continue
 				} else {
 					// IO errors are considered temporary anomalies. Retry.
 					// Close socket to flush out possible garbage. Do not put back in pool.
-					cmd.conn.Close()
+					cmd.closeConnection()
 				}
 
 				logger.Logger.Debug("Node %s: %s", cmd.node.String(), err.Error())
@@ -4034,10 +4069,9 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 			// situation. We will not put back the connection in the buffer.
 			if ifc.canPutConnBack() && cmd.conn.IsConnected() && KeepConnection(err) {
 				// Put connection back in pool.
-				cmd.node.PutConnection(cmd.conn)
+				cmd.returnConnection(ifc)
 			} else {
-				cmd.conn.Close()
-				cmd.conn = nil
+				cmd.closeConnection()
 			}
 
 			applyTransactionMetrics(cmd.node, ifc.commandType(), transStart)
@@ -4046,20 +4080,8 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 
 		applyTransactionMetrics(cmd.node, ifc.commandType(), transStart)
 
-		// in case it has grown and re-allocated, it means
-		// it was borrowed from the pool, sp put it back.
-		if &cmd.dataBufferCompress != &cmd.conn.origDataBuffer {
-			buffPool.Put(cmd.dataBufferCompress)
-		} else if &cmd.dataBuffer != &cmd.conn.origDataBuffer {
-			buffPool.Put(cmd.dataBuffer)
-		}
-
-		cmd.dataBuffer = nil
-		cmd.dataBufferCompress = nil
-		cmd.conn.dataBuffer = cmd.conn.origDataBuffer
-
 		// Put connection back in pool.
-		ifc.putConnection(cmd.conn)
+		cmd.returnConnection(ifc)
 
 		// command has completed successfully. Exit method.
 		return nil
