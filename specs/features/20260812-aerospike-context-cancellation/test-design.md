@@ -6,6 +6,7 @@
 - Cancel a context while socket I/O is blocked and verify the I/O wakes promptly.
 - Stop the callback after successful work, cancel the context, and verify the connection remains usable.
 - Force a deadline race at the retry limit and verify the returned error still matches the context cause.
+- Verify iterative execution selects the earlier context deadline when a command supplies a context.
 - Resize command buffers across multiple allocations and verify cleanup releases every borrowed buffer.
 - Run callback race tests under the race detector.
 - Verify a refreshed connection clears interruption state.

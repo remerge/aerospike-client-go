@@ -15,6 +15,8 @@ Passing a nil context behaves like `context.Background()`.
 The earlier of the policy deadline and the context deadline bounds network I/O.
 Context-aware reads continue to use the existing retry policy until the context ends.
 A context error is wrapped in an Aerospike timeout error and remains discoverable through `errors.Is`.
+Cancellation is checked immediately before and after connection acquisition.
+Connection acquisition itself is not interruptible, while subsequent blocked socket I/O is interrupted by cancellation.
 
 ## Connection Contract
 
@@ -28,3 +30,4 @@ Temporary command buffers borrowed during resize or compression are released bef
 
 Existing non-context APIs are unchanged.
 Successful `GetLazyContext` records must match `GetLazy` records for the same policy, key, and bin selection.
+Iterative command execution uses the same policy-and-context deadline selection when a future command supplies a context.

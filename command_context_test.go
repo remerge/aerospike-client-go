@@ -325,6 +325,23 @@ func TestExecuteAtPreservesContextAtMaxRetriesBoundary(t *testing.T) {
 	}
 }
 
+func TestExecuteIterUsesEarlierContextDeadline(t *testing.T) {
+	conn, _ := newStubConnection()
+	contextDeadline := time.Now().Add(10 * time.Minute)
+	ctx, cancel := context.WithDeadline(context.Background(), contextDeadline)
+	defer cancel()
+
+	cmd := newCommandExecutionStub(ctx, conn)
+	cmd.policy.TotalTimeout = time.Hour
+
+	if err := cmd.executeIter(cmd, 0); err != nil {
+		t.Fatalf("expected successful command, got %v", err)
+	}
+	if !conn.deadline.Equal(contextDeadline) {
+		t.Fatalf("expected context deadline %v, got %v", contextDeadline, conn.deadline)
+	}
+}
+
 func TestSizeBufferSzTracksBorrowedBuffersAcrossResizes(t *testing.T) {
 	conn, _ := newStubConnection()
 	cmd := baseCommand{

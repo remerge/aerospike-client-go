@@ -17,6 +17,7 @@
 - The context-aware read measured 63.86 us per operation versus 71.07 us for the current goroutine wrapper at the median.
 - The context-aware path allocated 1,121 bytes and 21 objects per operation versus 1,137 bytes and 21 objects for the wrapper.
 - A repeated delayed-I/O run exposed and then verified a fix for context error identity being hidden by `MAX_RETRIES_EXCEEDED`.
+- Iterative execution has regression coverage for selecting the earlier context deadline.
 
 ## Pending Gates
 
@@ -28,4 +29,4 @@
 
 Continue this narrow candidate.
 It cleared the 5% performance threshold and preserved cancellation and pool-safety invariants.
-This worktree is a prototype and has not been published, merged, or deployed.
+This candidate is published as a draft PR and has not been merged or deployed.

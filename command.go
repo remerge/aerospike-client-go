@@ -3660,14 +3660,17 @@ func (cmd *baseCommand) isRead() bool {
 
 func (cmd *baseCommand) execute(ifc command) Error {
 	policy := ifc.getPolicy(ifc).GetBasePolicy()
+	return cmd.executeAt(ifc, policy, cmd.commandDeadline(policy), -1)
+}
+
+func (cmd *baseCommand) commandDeadline(policy *BasePolicy) time.Time {
 	deadline := policy.deadline()
 	if cmd.ctx != nil {
 		if contextDeadline, ok := cmd.ctx.Deadline(); ok && (deadline.IsZero() || contextDeadline.Before(deadline)) {
 			deadline = contextDeadline
 		}
 	}
-
-	return cmd.executeAt(ifc, policy, deadline, -1)
+	return deadline
 }
 
 func (cmd *baseCommand) contextError() Error {
@@ -3752,9 +3755,7 @@ func (cmd *baseCommand) returnConnection(ifc command) {
 
 func (cmd *baseCommand) executeIter(ifc command, iter int) Error {
 	policy := ifc.getPolicy(ifc).GetBasePolicy()
-	deadline := policy.deadline()
-
-	err := cmd.executeAt(ifc, policy, deadline, iter)
+	err := cmd.executeAt(ifc, policy, cmd.commandDeadline(policy), iter)
 	if err != nil && err.IsInDoubt() {
 		cmd.onInDoubt()
 	}
