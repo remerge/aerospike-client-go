@@ -238,7 +238,7 @@ type baseCommand struct {
 	// the buffer, this padding will be used to compress the command in-place,
 	// and then the compressed proto header will be written.
 	dataBufferCompress []byte
-	borrowedBuffer     []byte
+	borrowedBuffers    [][]byte
 	// oneShot determines if streaming commands like query, scan or queryAggregate
 	// are not retried if they error out mid-parsing
 	oneShot bool
@@ -3532,7 +3532,6 @@ func (cmd *baseCommand) sizeBufferSz(size int, willCompress bool) Error {
 		cmd.conn.buffHist.Add(uint64(size))
 	}
 
-	cmd.borrowedBuffer = nil
 	if size <= len(cmd.dataBuffer) {
 		// don't touch the buffer
 		// this is a noop, here to silence the linters
@@ -3542,7 +3541,7 @@ func (cmd *baseCommand) sizeBufferSz(size int, willCompress bool) Error {
 	} else {
 		// not enough space
 		cmd.dataBuffer = buffPool.Get(size)
-		cmd.borrowedBuffer = cmd.dataBuffer
+		cmd.borrowedBuffers = append(cmd.borrowedBuffers, cmd.dataBuffer)
 	}
 
 	// The trick here to keep a ref to the buffer, and set the buffer itself
@@ -3605,16 +3604,12 @@ func (cmd *baseCommand) compress() Error {
 		// If not possible to reuse it, reallocate a buffer.
 		if compressedSz+msgHeaderPad > len(cmd.dataBufferCompress) {
 			// compression added to the size of the message
-			oldBorrowedBuffer := cmd.borrowedBuffer
 			buf := buffPool.Get(compressedSz + msgHeaderPad)
 			if n := copy(buf[msgHeaderPad:], b.Bytes()); n < compressedSz {
 				return newError(types.SERIALIZE_ERROR)
 			}
 			cmd.dataBufferCompress = buf
-			cmd.borrowedBuffer = buf
-			if len(oldBorrowedBuffer) > 0 {
-				buffPool.Put(oldBorrowedBuffer)
-			}
+			cmd.borrowedBuffers = append(cmd.borrowedBuffers, buf)
 		}
 
 		// Use compressed buffer if compression completed within original buffer size.
@@ -3720,10 +3715,10 @@ func (cmd *baseCommand) watchContext(conn *Connection) contextwatch.Watch {
 }
 
 func (cmd *baseCommand) releaseBorrowedBuffer() {
-	if len(cmd.borrowedBuffer) > 0 {
-		buffPool.Put(cmd.borrowedBuffer)
-		cmd.borrowedBuffer = nil
+	for i := range cmd.borrowedBuffers {
+		buffPool.Put(cmd.borrowedBuffers[i])
 	}
+	cmd.borrowedBuffers = nil
 }
 
 func (cmd *baseCommand) cleanupConnectionState() {
@@ -3788,6 +3783,9 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 		if (policy.MaxRetries <= 0 && cmd.commandSentCounter > 1) || (policy.MaxRetries > 0 && cmd.commandSentCounter > policy.MaxRetries) {
 			// A context may expire between the check above and this branch. Preserve
 			// cancellation identity instead of obscuring it behind MAX_RETRIES_EXCEEDED.
+			if contextErr := cmd.contextErrorFrom(err); contextErr != nil {
+				return contextErr.iter(cmd.commandSentCounter).setInDoubt(ifc.isRead(), cmd.commandSentCounter).setNode(cmd.node)
+			}
 			if contextErr := cmd.contextError(); contextErr != nil {
 				return contextErr.iter(cmd.commandSentCounter).setInDoubt(ifc.isRead(), cmd.commandSentCounter).setNode(cmd.node)
 			}

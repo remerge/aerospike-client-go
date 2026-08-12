@@ -124,11 +124,21 @@ func (c *stubNetConn) SetDeadline(t time.Time) error {
 func (c *stubNetConn) SetReadDeadline(t time.Time) error  { return c.SetDeadline(t) }
 func (c *stubNetConn) SetWriteDeadline(t time.Time) error { return c.SetDeadline(t) }
 
+type deadlineRaceContext struct {
+	deadline time.Time
+	done     chan struct{}
+}
+
+func (ctx *deadlineRaceContext) Deadline() (time.Time, bool) { return ctx.deadline, true }
+func (ctx *deadlineRaceContext) Done() <-chan struct{}       { return ctx.done }
+func (ctx *deadlineRaceContext) Err() error                  { return nil }
+func (ctx *deadlineRaceContext) Value(key any) any           { return nil }
+
 type commandExecutionStub struct {
 	baseCommand
 	policy          *BasePolicy
 	acquiredConn    *Connection
-	getConnHook     func()
+	getConnHook     func(*commandExecutionStub) (*Connection, Error)
 	writeBufferHook func(*commandExecutionStub) Error
 	parseResultHook func(*commandExecutionStub) Error
 	putConnCalls    int
@@ -161,7 +171,7 @@ func (cmd *commandExecutionStub) getNode(ifc command) (*Node, Error) {
 }
 func (cmd *commandExecutionStub) getConnection(policy Policy) (*Connection, Error) {
 	if cmd.getConnHook != nil {
-		cmd.getConnHook()
+		return cmd.getConnHook(cmd)
 	}
 	return cmd.acquiredConn, nil
 }
@@ -231,7 +241,10 @@ func TestExecuteAtReturnsCleanConnectionOnCancellationBeforeSend(t *testing.T) {
 	conn, netConn := newStubConnection()
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := newCommandExecutionStub(ctx, conn)
-	cmd.getConnHook = cancel
+	cmd.getConnHook = func(*commandExecutionStub) (*Connection, Error) {
+		cancel()
+		return conn, nil
+	}
 
 	err := cmd.executeAt(cmd, cmd.policy, time.Time{}, -1)
 	if !errors.Is(err, context.Canceled) {
@@ -291,5 +304,56 @@ func TestExecuteAtIgnoresLateCancellationAfterSuccessfulParse(t *testing.T) {
 	}
 	if cmd.returnedConn == nil || cmd.returnedConn.interrupted.Load() {
 		t.Fatal("returned connection remained interrupted")
+	}
+}
+
+func TestExecuteAtPreservesContextAtMaxRetriesBoundary(t *testing.T) {
+	conn, _ := newStubConnection()
+	ctx := &deadlineRaceContext{
+		deadline: time.Now().Add(20 * time.Millisecond),
+		done:     make(chan struct{}),
+	}
+	cmd := newCommandExecutionStub(ctx, conn)
+	cmd.getConnHook = func(cmd *commandExecutionStub) (*Connection, Error) {
+		time.Sleep(30 * time.Millisecond)
+		return nil, ErrTimeout.err()
+	}
+
+	err := cmd.executeAt(cmd, cmd.policy, time.Time{}, -1)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context deadline exceeded, got %v", err)
+	}
+}
+
+func TestSizeBufferSzTracksBorrowedBuffersAcrossResizes(t *testing.T) {
+	conn, _ := newStubConnection()
+	cmd := baseCommand{
+		conn: conn,
+		bufferEx: bufferEx{
+			dataBuffer: conn.dataBuffer,
+		},
+	}
+
+	if err := cmd.sizeBufferSz(len(conn.dataBuffer)+1, false); err != nil {
+		t.Fatal(err)
+	}
+	firstBorrowed := cmd.dataBuffer
+	if len(cmd.borrowedBuffers) != 1 {
+		t.Fatalf("expected one borrowed buffer, got %d", len(cmd.borrowedBuffers))
+	}
+
+	if err := cmd.sizeBufferSz(cap(firstBorrowed)+1, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(cmd.borrowedBuffers) != 2 {
+		t.Fatalf("expected two borrowed buffers, got %d", len(cmd.borrowedBuffers))
+	}
+	if len(cmd.borrowedBuffers[0]) == 0 || len(cmd.borrowedBuffers[1]) == 0 {
+		t.Fatal("expected both borrowed buffers to remain tracked")
+	}
+
+	cmd.cleanupConnectionState()
+	if cmd.borrowedBuffers != nil {
+		t.Fatal("cleanup did not release borrowed buffers")
 	}
 }
