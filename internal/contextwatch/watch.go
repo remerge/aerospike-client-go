@@ -13,6 +13,8 @@ type Watch struct {
 	done *sync.WaitGroup
 }
 
+// Start registers interrupt to run when ctx is canceled.
+// The returned Watch must be finished before the protected resource is reused or released.
 func Start(ctx context.Context, interrupt func()) Watch {
 	if ctx == nil || ctx.Done() == nil {
 		return Watch{}

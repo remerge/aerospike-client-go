@@ -10,6 +10,7 @@ The command continues using the connection and its buffers after the caller retu
 
 `GetLazyContext` accepts a context and otherwise preserves `GetLazy` behavior.
 The earlier of the Aerospike policy deadline and the context deadline bounds network I/O.
+Context-aware reads keep the existing retry policy until the context ends.
 Explicit context cancellation interrupts blocked network I/O.
 An interrupted connection is closed and never returned to the pool.
 The command method does not return until its cancellation callback has either been stopped or completed.
