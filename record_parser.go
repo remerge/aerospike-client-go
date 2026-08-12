@@ -23,7 +23,6 @@ import (
 	Buffer "github.com/aerospike/aerospike-client-go/v8/utils/buffer"
 )
 
-// Task interface defines methods for asynchronous tasks.
 type recordParser struct {
 	resultCode types.ResultCode
 	generation uint32
@@ -35,7 +34,6 @@ type recordParser struct {
 	lazy bool
 }
 
-// recordParser initializes task with fields needed to query server nodes.
 func newRecordParser(cmd *baseCommand) (*recordParser, Error) {
 	rp := &recordParser{
 		cmd: cmd,
