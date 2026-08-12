@@ -17,6 +17,7 @@ package aerospike
 import (
 	"bytes"
 	"compress/zlib"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	amap "github.com/aerospike/aerospike-client-go/v8/internal/atomic/map"
+	"github.com/aerospike/aerospike-client-go/v8/internal/contextwatch"
 
 	"github.com/aerospike/aerospike-client-go/v8/logger"
 	"github.com/aerospike/aerospike-client-go/v8/types"
@@ -224,6 +226,7 @@ type baseCommand struct {
 
 	txn     *Txn
 	version *uint64
+	ctx     context.Context
 
 	node *Node
 	conn *Connection
@@ -3655,8 +3658,57 @@ func (cmd *baseCommand) isRead() bool {
 func (cmd *baseCommand) execute(ifc command) Error {
 	policy := ifc.getPolicy(ifc).GetBasePolicy()
 	deadline := policy.deadline()
+	if cmd.ctx != nil {
+		if contextDeadline, ok := cmd.ctx.Deadline(); ok && (deadline.IsZero() || contextDeadline.Before(deadline)) {
+			deadline = contextDeadline
+		}
+	}
 
 	return cmd.executeAt(ifc, policy, deadline, -1)
+}
+
+func (cmd *baseCommand) contextError() Error {
+	if cmd.ctx == nil || cmd.ctx.Err() == nil {
+		return nil
+	}
+	return newErrorAndWrap(cmd.ctx.Err(), types.TIMEOUT, "command canceled")
+}
+
+func (cmd *baseCommand) contextErrorFrom(err error) Error {
+	if contextErr := cmd.contextError(); contextErr != nil {
+		return contextErr
+	}
+	if cmd.ctx == nil || err == nil {
+		return nil
+	}
+	// Socket deadlines are set to the earlier of policy and context deadlines.
+	// The timer and the read deadline can race, so infer the context cause when
+	// network I/O timed out at or after the context deadline but ctx.Err() has
+	// not yet become observable to this goroutine.
+	if deadline, ok := cmd.ctx.Deadline(); ok && !time.Now().Before(deadline) && errors.Is(err, ErrTimeout) {
+		return newErrorAndWrap(context.DeadlineExceeded, types.TIMEOUT, "command canceled")
+	}
+	return nil
+}
+
+func (cmd *baseCommand) sleepBetweenRetries(interval time.Duration) Error {
+	if cmd.ctx == nil {
+		time.Sleep(interval)
+		return nil
+	}
+
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-cmd.ctx.Done():
+		return cmd.contextError()
+	}
+}
+
+func (cmd *baseCommand) watchContext(conn *Connection) contextwatch.Watch {
+	return contextwatch.Start(cmd.ctx, conn.interruptIO)
 }
 
 func (cmd *baseCommand) executeIter(ifc command, iter int) Error {
@@ -3682,11 +3734,19 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 	var err Error
 	// Execute command until successful, timed out or maximum iterations have been reached.
 	for {
+		if contextErr := cmd.contextError(); contextErr != nil {
+			return contextErr.iter(cmd.commandSentCounter).setInDoubt(ifc.isRead(), cmd.commandSentCounter).setNode(cmd.node)
+		}
 		cmd.commandSentCounter++
 		loopCount++
 
 		// too many retries
 		if (policy.MaxRetries <= 0 && cmd.commandSentCounter > 1) || (policy.MaxRetries > 0 && cmd.commandSentCounter > policy.MaxRetries) {
+			// A context may expire between the check above and this branch. Preserve
+			// cancellation identity instead of obscuring it behind MAX_RETRIES_EXCEEDED.
+			if contextErr := cmd.contextErrorFrom(err); contextErr != nil {
+				return contextErr.iter(cmd.commandSentCounter).setInDoubt(ifc.isRead(), cmd.commandSentCounter).setNode(cmd.node)
+			}
 			if cmd.node != nil && cmd.node.cluster != nil {
 				cmd.node.cluster.maxRetriesExceededCount.GetAndIncrement()
 			}
@@ -3701,7 +3761,9 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 				break
 			}
 
-			time.Sleep(interval)
+			if contextErr := cmd.sleepBetweenRetries(interval); contextErr != nil {
+				return contextErr.iter(cmd.commandSentCounter).setInDoubt(ifc.isRead(), cmd.commandSentCounter).setNode(cmd.node)
+			}
 			if policy.SleepMultiplier > 1 {
 				interval = time.Duration(float64(interval) * policy.SleepMultiplier)
 			}
@@ -3803,6 +3865,18 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 			logger.Logger.Debug("Node %s: %s", cmd.node.String(), err.Error())
 			continue
 		}
+		if contextErr := cmd.contextError(); contextErr != nil {
+			cmd.conn.Close()
+			cmd.conn = nil
+			return contextErr.iter(cmd.commandSentCounter).setInDoubt(ifc.isRead(), cmd.commandSentCounter).setNode(cmd.node)
+		}
+		if cmd.ctx != nil && !deadline.IsZero() {
+			if err = cmd.conn.SetTimeout(deadline, policy.SocketTimeout); err != nil {
+				cmd.conn.Close()
+				cmd.conn = nil
+				return err.iter(cmd.commandSentCounter).setInDoubt(ifc.isRead(), cmd.commandSentCounter).setNode(cmd.node)
+			}
+		}
 
 		// Assign the connection buffer to the command buffer
 		cmd.dataBuffer = cmd.conn.dataBuffer
@@ -3812,6 +3886,12 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 
 		if err != nil {
 			applyTransactionErrorMetrics(cmd.node)
+			if contextErr := cmd.contextErrorFrom(err); contextErr != nil {
+				cmd.conn.Close()
+				cmd.conn = nil
+				applyTransactionMetrics(cmd.node, ifc.commandType(), transStart)
+				return contextErr.iter(cmd.commandSentCounter).setInDoubt(ifc.isRead(), cmd.commandSentCounter).setNode(cmd.node)
+			}
 
 			// chain the errors
 			err = chainErrors(err, errChain).iter(cmd.commandSentCounter).setNode(cmd.node).setInDoubt(ifc.isRead(), cmd.commandSentCounter)
@@ -3842,6 +3922,8 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 			}
 		}
 
+		contextWatch := cmd.watchContext(cmd.conn)
+
 		// Send command.
 		cmd.commandWasSent = true
 		if metricsEnabled {
@@ -3855,6 +3937,13 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 		}
 
 		if err != nil {
+			if contextErr := contextWatch.Finish(); contextErr != nil {
+				applyTransactionErrorMetrics(cmd.node)
+				cmd.conn.Close()
+				cmd.conn = nil
+				applyTransactionMetrics(cmd.node, ifc.commandType(), transStart)
+				return newErrorAndWrap(contextErr, types.TIMEOUT, "command canceled").iter(cmd.commandSentCounter).setInDoubt(ifc.isRead(), cmd.commandSentCounter).setNode(cmd.node)
+			}
 			applyTransactionErrorMetrics(cmd.node)
 
 			// chain the errors
@@ -3891,8 +3980,22 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 			err = ifc.parseResult(ifc, cmd.conn)
 		}
 
+		if contextErr := contextWatch.Finish(); contextErr != nil {
+			applyTransactionErrorMetrics(cmd.node)
+			cmd.conn.Close()
+			cmd.conn = nil
+			applyTransactionMetrics(cmd.node, ifc.commandType(), transStart)
+			return newErrorAndWrap(contextErr, types.TIMEOUT, "command canceled").iter(cmd.commandSentCounter).setInDoubt(ifc.isRead(), cmd.commandSentCounter).setNode(cmd.node)
+		}
+
 		if err != nil {
 			applyTransactionErrorMetrics(cmd.node)
+			if contextErr := cmd.contextErrorFrom(err); contextErr != nil {
+				cmd.conn.Close()
+				cmd.conn = nil
+				applyTransactionMetrics(cmd.node, ifc.commandType(), transStart)
+				return contextErr.iter(cmd.commandSentCounter).setInDoubt(ifc.isRead(), cmd.commandSentCounter).setNode(cmd.node)
+			}
 
 			// chain the errors
 			errChain = chainErrors(err, errChain).iter(cmd.commandSentCounter).setNode(cmd.node).setInDoubt(ifc.isRead(), cmd.commandSentCounter)
