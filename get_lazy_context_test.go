@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -15,8 +16,16 @@ func TestGetLazyContextMatchesGetLazy(t *testing.T) {
 	if keyErr != nil {
 		t.Fatal(keyErr)
 	}
+	expectedMetadata := map[interface{}]interface{}{
+		"name":  "expected",
+		"count": 42,
+		"nested": map[interface{}]interface{}{
+			"ok":   true,
+			"list": []interface{}{1, "two", false},
+		},
+	}
 	writePolicy := as.NewWritePolicy(0, 0)
-	if err := client.Put(writePolicy, key, as.BinMap{"value": "expected", "count": 42}); err != nil {
+	if err := client.Put(writePolicy, key, as.BinMap{"value": "expected", "count": 42, "metadata": expectedMetadata}); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -37,6 +46,15 @@ func TestGetLazyContextMatchesGetLazy(t *testing.T) {
 	}
 	if got.Bins["value"] != want.Bins["value"] || got.Bins["count"] != want.Bins["count"] {
 		t.Fatalf("record mismatch: got=%v want=%v", got.Bins, want.Bins)
+	}
+
+	wantMetadata := unpackLazyMap(t, want.Bins["metadata"])
+	gotMetadata := unpackLazyMap(t, got.Bins["metadata"])
+	if !reflect.DeepEqual(mapToIfcMap(wantMetadata), mapToIfcMap(expectedMetadata)) {
+		t.Fatalf("GetLazy metadata mismatch: got=%#v want=%#v", wantMetadata, expectedMetadata)
+	}
+	if !reflect.DeepEqual(mapToIfcMap(gotMetadata), mapToIfcMap(expectedMetadata)) {
+		t.Fatalf("GetLazyContext metadata mismatch: got=%#v want=%#v", gotMetadata, expectedMetadata)
 	}
 }
 
@@ -122,4 +140,24 @@ func TestGetLazyContextInterruptsDelayedInFlightIO(t *testing.T) {
 	if record.Bins["value"] != "delayed" {
 		t.Fatalf("unexpected record after interrupted command: %v", record.Bins)
 	}
+}
+
+func unpackLazyMap(t *testing.T, value interface{}) interface{} {
+	t.Helper()
+
+	method := reflect.ValueOf(value).MethodByName("UnpackMap")
+	if !method.IsValid() {
+		t.Fatalf("expected lazy map unpacker, got %T", value)
+	}
+
+	results := method.Call(nil)
+	if len(results) != 2 {
+		t.Fatalf("unexpected UnpackMap result count: %d", len(results))
+	}
+	if !results[1].IsNil() {
+		err, _ := results[1].Interface().(error)
+		t.Fatalf("failed to unpack lazy map: %v", err)
+	}
+
+	return results[0].Interface()
 }
