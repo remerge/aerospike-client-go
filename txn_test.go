@@ -60,7 +60,7 @@ var _ = gg.Describe("Aerospike", func() {
 				function get_gen(rec)
 					return record.gen(rec)
 				end
-
+				
 				function rec_read(rec)
 					local m = map()
 					names = record.bin_names(rec)
