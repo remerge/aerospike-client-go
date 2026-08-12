@@ -123,4 +123,3 @@ func (cmd *batchSingleTxnRollCommand) Execute() Error {
 func (cmd *batchSingleTxnRollCommand) commandType() commandType {
 	return ttPut
 }
-
