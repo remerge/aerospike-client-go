@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -119,8 +118,23 @@ type blockingNetConn struct {
 	closed      atomic.Bool
 }
 
+type finalReadNetConn struct {
+	readStarted chan struct{}
+	interrupted chan struct{}
+	startOnce   sync.Once
+	stopOnce    sync.Once
+	closed      atomic.Bool
+}
+
 func newBlockingNetConn() *blockingNetConn {
 	return &blockingNetConn{
+		readStarted: make(chan struct{}),
+		interrupted: make(chan struct{}),
+	}
+}
+
+func newFinalReadNetConn() *finalReadNetConn {
+	return &finalReadNetConn{
 		readStarted: make(chan struct{}),
 		interrupted: make(chan struct{}),
 	}
@@ -150,6 +164,34 @@ func (c *blockingNetConn) SetReadDeadline(deadline time.Time) error {
 	return c.SetDeadline(deadline)
 }
 func (c *blockingNetConn) SetWriteDeadline(deadline time.Time) error {
+	return c.SetDeadline(deadline)
+}
+
+func (c *finalReadNetConn) Read(b []byte) (int, error) {
+	c.startOnce.Do(func() { close(c.readStarted) })
+	<-c.interrupted
+	b[0] = 42
+	return 1, os.ErrDeadlineExceeded
+}
+
+func (*finalReadNetConn) Write(b []byte) (int, error) { return len(b), nil }
+func (c *finalReadNetConn) Close() error {
+	c.closed.Store(true)
+	c.stopOnce.Do(func() { close(c.interrupted) })
+	return nil
+}
+func (*finalReadNetConn) LocalAddr() net.Addr  { return stubAddr("local") }
+func (*finalReadNetConn) RemoteAddr() net.Addr { return stubAddr("remote") }
+func (c *finalReadNetConn) SetDeadline(deadline time.Time) error {
+	if !deadline.After(time.Now()) {
+		c.stopOnce.Do(func() { close(c.interrupted) })
+	}
+	return nil
+}
+func (c *finalReadNetConn) SetReadDeadline(deadline time.Time) error {
+	return c.SetDeadline(deadline)
+}
+func (c *finalReadNetConn) SetWriteDeadline(deadline time.Time) error {
 	return c.SetDeadline(deadline)
 }
 
@@ -273,17 +315,6 @@ func newStubConnection() (*Connection, *stubNetConn) {
 	return conn, netConn
 }
 
-func waitForInterrupted(t *testing.T, conn *Connection) {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for !conn.interrupted.Load() && time.Now().Before(deadline) {
-		runtime.Gosched()
-	}
-	if !conn.interrupted.Load() {
-		t.Fatal("context watcher did not interrupt the connection")
-	}
-}
-
 func TestExecuteAtReturnsCleanConnectionOnCancellationBeforeSend(t *testing.T) {
 	conn, netConn := newStubConnection()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -329,28 +360,25 @@ func TestExecuteAtReturnsCleanConnectionOnWriteBufferCancellation(t *testing.T) 
 	}
 }
 
-func TestExecuteAtIgnoresLateCancellationAfterSuccessfulParse(t *testing.T) {
+func TestExecuteAtCancellationBeforeWatchInstallationReturnsContextError(t *testing.T) {
 	conn, netConn := newStubConnection()
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := newCommandExecutionStub(ctx, conn)
-	cmd.parseResultHook = func(cmd *commandExecutionStub) Error {
+	cmd.writeBufferHook = func(cmd *commandExecutionStub) Error {
 		cancel()
-		waitForInterrupted(t, cmd.acquiredConn)
+		cmd.dataOffset = 30
 		return nil
 	}
 
 	err := cmd.executeAt(cmd, cmd.policy, time.Time{}, -1)
-	if err != nil {
-		t.Fatalf("expected successful command, got %v", err)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
 	}
-	if cmd.putConnCalls != 1 {
-		t.Fatalf("expected connection to return to pool once, got %d", cmd.putConnCalls)
+	if cmd.putConnCalls != 0 {
+		t.Fatalf("canceled connection returned to pool %d times", cmd.putConnCalls)
 	}
-	if netConn.closed {
-		t.Fatal("successful command closed the connection")
-	}
-	if cmd.returnedConn == nil || cmd.returnedConn.interrupted.Load() {
-		t.Fatal("returned connection remained interrupted")
+	if !netConn.closed {
+		t.Fatal("canceled connection was not closed")
 	}
 }
 
@@ -389,6 +417,60 @@ func TestExecuteAtCancellationDuringBlockedReadDiscardsConnection(t *testing.T) 
 		}
 	case <-time.After(time.Second):
 		t.Fatal("blocked command did not return after cancellation")
+	}
+
+	if cmd.putConnCalls != 0 {
+		t.Fatalf("interrupted connection returned to pool %d times", cmd.putConnCalls)
+	}
+	if !netConn.closed.Load() {
+		t.Fatal("interrupted connection was not closed")
+	}
+
+	followUpConn, followUpNetConn := newStubConnection()
+	followUp := newCommandExecutionStub(context.Background(), followUpConn)
+	if err := followUp.executeAt(followUp, followUp.policy, time.Time{}, -1); err != nil {
+		t.Fatalf("fresh follow-up command failed: %v", err)
+	}
+	if followUp.putConnCalls != 1 || followUpNetConn.closed {
+		t.Fatal("fresh follow-up connection was not returned healthy")
+	}
+}
+
+func TestExecuteAtCancellationDuringFinalReadDiscardsConnection(t *testing.T) {
+	netConn := newFinalReadNetConn()
+	buffer := make([]byte, 64)
+	conn := &Connection{
+		conn:                 netConn,
+		dataBuffer:           buffer,
+		origDataBuffer:       buffer,
+		bufferAdjustDeadline: time.Now().Add(time.Hour),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := newCommandExecutionStub(ctx, conn)
+	cmd.parseResultHook = func(cmd *commandExecutionStub) Error {
+		_, err := cmd.conn.Read(make([]byte, 1), 1)
+		return err
+	}
+
+	done := make(chan Error, 1)
+	go func() {
+		done <- cmd.executeAt(cmd, cmd.policy, time.Time{}, -1)
+	}()
+
+	select {
+	case <-netConn.readStarted:
+	case <-time.After(time.Second):
+		t.Fatal("command did not block while reading the final response byte")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context cancellation, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("final-read cancellation did not return")
 	}
 
 	if cmd.putConnCalls != 0 {

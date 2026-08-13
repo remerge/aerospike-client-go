@@ -37,7 +37,7 @@ func (watch Watch) Finish() error {
 	}
 	if watch.stop() {
 		watch.done.Done()
-		return nil
+		return watch.ctx.Err()
 	}
 	watch.done.Wait()
 	return watch.ctx.Err()

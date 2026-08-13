@@ -4019,7 +4019,12 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 		} else {
 			err = ifc.parseResult(ifc, cmd.conn)
 		}
-		contextWatch.Finish()
+		if contextErr := contextWatch.Finish(); contextErr != nil {
+			applyTransactionErrorMetrics(cmd.node)
+			cmd.closeConnection()
+			applyTransactionMetrics(cmd.node, ifc.commandType(), transStart)
+			return newErrorAndWrap(contextErr, types.TIMEOUT, "command canceled").iter(cmd.commandSentCounter).setInDoubt(ifc.isRead(), cmd.commandSentCounter).setNode(cmd.node)
+		}
 
 		if err != nil {
 			applyTransactionErrorMetrics(cmd.node)
