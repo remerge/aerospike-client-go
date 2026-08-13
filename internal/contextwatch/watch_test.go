@@ -3,7 +3,6 @@ package contextwatch
 import (
 	"context"
 	"errors"
-	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -11,8 +10,9 @@ import (
 func TestCancelRunsInterruptBeforeFinishReturns(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var interrupted atomic.Bool
-	watch := Start(ctx, func() {
+	watch := Start(ctx, func(force bool) bool {
 		interrupted.Store(true)
+		return true
 	})
 
 	cancel()
@@ -29,12 +29,18 @@ func TestStartAlreadyCanceledContextInterruptsImmediately(t *testing.T) {
 	cancel()
 
 	var interrupted atomic.Int32
-	watch := Start(ctx, func() {
+	var forced atomic.Bool
+	watch := Start(ctx, func(force bool) bool {
+		forced.Store(force)
 		interrupted.Add(1)
+		return true
 	})
 
 	if interrupted.Load() != 1 {
 		t.Fatalf("expected one interrupt, got %d", interrupted.Load())
+	}
+	if !forced.Load() {
+		t.Fatal("expected forced interrupt for pre-canceled context")
 	}
 	if err := watch.Finish(); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context cancellation, got %v", err)
@@ -44,8 +50,9 @@ func TestStartAlreadyCanceledContextInterruptsImmediately(t *testing.T) {
 func TestFinishPreventsLateInterrupt(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var interrupted atomic.Bool
-	watch := Start(ctx, func() {
+	watch := Start(ctx, func(force bool) bool {
 		interrupted.Store(true)
+		return true
 	})
 
 	if err := watch.Finish(); err != nil {
@@ -57,18 +64,16 @@ func TestFinishPreventsLateInterrupt(t *testing.T) {
 	}
 }
 
-func TestFinishReturnsNilWhenStopWinsAfterLateCancel(t *testing.T) {
+func TestFinishReturnsNilWhenLateCancelFindsNoActiveIO(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	callbackRan := make(chan struct{})
+	watch := Start(ctx, func(force bool) bool {
+		close(callbackRan)
+		return false
+	})
 
-	done := new(sync.WaitGroup)
-	done.Add(1)
-	watch := Watch{
-		ctx:         ctx,
-		stop:        func() bool { return true },
-		done:        done,
-		interrupted: &atomic.Bool{},
-	}
+	cancel()
+	<-callbackRan
 
 	if err := watch.Finish(); err != nil {
 		t.Fatalf("expected successful finish, got %v", err)
@@ -79,8 +84,9 @@ func TestCancelFinishRaceAlwaysCoordinates(t *testing.T) {
 	for range 10_000 {
 		ctx, cancel := context.WithCancel(context.Background())
 		var interrupted atomic.Bool
-		watch := Start(ctx, func() {
+		watch := Start(ctx, func(force bool) bool {
 			interrupted.Store(true)
+			return true
 		})
 
 		go cancel()

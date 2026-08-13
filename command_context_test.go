@@ -17,20 +17,26 @@ import (
 )
 
 func TestCommandContextWatchInterruptsBlockedIO(t *testing.T) {
-	clientConn, serverConn := net.Pipe()
-	defer clientConn.Close()
-	defer serverConn.Close()
-
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := baseCommand{ctx: ctx}
-	connection := &Connection{conn: clientConn}
+	netConn := newBlockingNetConn()
+	connection := &Connection{
+		conn:                 netConn,
+		bufferAdjustDeadline: time.Now().Add(time.Hour),
+	}
 	watch := cmd.watchContext(connection)
 
-	readDone := make(chan error, 1)
+	readDone := make(chan Error, 1)
 	go func() {
-		_, err := clientConn.Read(make([]byte, 1))
+		_, err := connection.Read(make([]byte, 1), 1)
 		readDone <- err
 	}()
+
+	select {
+	case <-netConn.readStarted:
+	case <-time.After(time.Second):
+		t.Fatal("blocked read did not start")
+	}
 
 	cancel()
 	select {
@@ -92,9 +98,41 @@ func TestCommandContextWatchStopPreventsLateConnectionInterruption(t *testing.T)
 func TestConnectionRefreshClearsInterruptedState(t *testing.T) {
 	connection := &Connection{bufferAdjustDeadline: time.Now().Add(time.Hour)}
 	connection.interrupted.Store(true)
+	connection.socketState.Store(socketStateInterrupted)
 	connection.refresh()
 	if connection.interrupted.Load() {
 		t.Fatal("refresh did not clear interrupted state")
+	}
+	if state := connection.socketState.Load(); state != socketStateIdle {
+		t.Fatalf("expected idle socket state, got %d", state)
+	}
+}
+
+func TestConnectionInterruptIOOnlyWhileSocketIOIsActive(t *testing.T) {
+	connection := &Connection{}
+	if err := connection.beginSocketIO(); err != nil {
+		t.Fatalf("beginSocketIO failed: %v", err)
+	}
+	if !connection.interruptIO(false) {
+		t.Fatal("expected active socket I/O to be interrupted")
+	}
+	connection.finishSocketIO()
+	if !connection.interrupted.Load() {
+		t.Fatal("active socket interruption did not poison the connection")
+	}
+}
+
+func TestConnectionInterruptIOAfterSocketIOCompletesIsIgnored(t *testing.T) {
+	connection := &Connection{}
+	if err := connection.beginSocketIO(); err != nil {
+		t.Fatalf("beginSocketIO failed: %v", err)
+	}
+	connection.finishSocketIO()
+	if connection.interruptIO(false) {
+		t.Fatal("late interruption should not win after socket I/O completed")
+	}
+	if connection.interrupted.Load() {
+		t.Fatal("late interruption poisoned a healthy connection")
 	}
 }
 
