@@ -16,6 +16,7 @@ package aerospike
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -760,6 +761,37 @@ func (clnt *Client) GetLazy(policy *BasePolicy, key *Key, binNames ...string) (*
 	command.lazy = true
 
 	if err := command.Execute(); err != nil {
+		return nil, err
+	}
+	return command.GetRecord(), nil
+}
+
+// GetLazyContext is like GetLazy, but it also observes context cancellation.
+// A nil context behaves like context.Background(), and the earlier of the
+// policy deadline or context deadline bounds the command.
+// Cancellation is checked before and after every non-blocking connection-pool
+// acquisition attempt, so an exhausted pool cannot extend the context lifetime.
+// A connection interrupted by cancellation is closed and discarded rather than
+// returned to the pool with a potentially unread response.
+func (clnt *Client) GetLazyContext(ctx context.Context, policy *BasePolicy, key *Key, binNames ...string) (*Record, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	policy = clnt.getUsablePolicy(policy)
+
+	if policy.Txn != nil {
+		if err := policy.Txn.prepareRead(key.namespace); err != nil {
+			return nil, err
+		}
+	}
+
+	command, err := newReadCommand(clnt.cluster, policy, key, binNames)
+	if err != nil {
+		return nil, err
+	}
+	command.lazy = true
+
+	if err := command.ExecuteContext(ctx); err != nil {
 		return nil, err
 	}
 	return command.GetRecord(), nil

@@ -24,6 +24,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aerospike/aerospike-client-go/v8/logger"
@@ -98,10 +99,21 @@ type Connection struct {
 
 	closer sync.Once
 
+	// interrupted is set while a context cancellation is interrupting command I/O.
+	// An interrupted connection must be closed instead of returned to the pool.
+	interrupted atomic.Bool
+	socketState atomic.Int32
+
 	// Used to track the last time the connection was used. This is used to determine
 	// if the connection is idle/timeout and should be closed.
 	salvageConnection bool
 }
+
+const (
+	socketStateIdle int32 = iota
+	socketStateActive
+	socketStateInterrupted
+)
 
 // makes sure that the connection is closed eventually, even if it is not consumed
 func connectionFinalizer(c *Connection) {
@@ -119,7 +131,7 @@ func errToAerospikeErr(conn *Connection, err error) (aerr Error) {
 	if terr, ok := err.(net.Error); ok {
 		if terr.Timeout() {
 			if conn != nil {
-			 	if conn.node != nil {
+				if conn.node != nil {
 					conn.node.stats.ConnectionsTimeoutErrors.IncrementAndGet()
 				}
 				if errors.Is(terr, os.ErrDeadlineExceeded) {
@@ -229,7 +241,11 @@ func (ctn *Connection) Write(buf []byte) (total int, aerr Error) {
 	// make sure all bytes are written
 	// Don't worry about the loop, timeout has been set elsewhere
 	if err = ctn.updateDeadline(); err == nil {
-		if total, err = ctn.conn.Write(buf); err == nil {
+		if err = ctn.beginSocketIO(); err == nil {
+			total, err = ctn.conn.Write(buf)
+			ctn.completeSocketIO()
+		}
+		if err == nil {
 			return total, nil
 		}
 
@@ -261,12 +277,17 @@ func (ctn *Connection) Read(buf []byte, length int) (total int, aerr Error) {
 		if err = ctn.updateDeadline(); err != nil {
 			break
 		}
+		if err = ctn.beginSocketIO(); err != nil {
+			break
+		}
 
 		if !ctn.compressed {
 			r, err = ctn.conn.Read(buf[total:length])
+			ctn.completeSocketIO()
 			ctn.totalReceived += int64(r)
 		} else {
 			r, err = ctn.inflater.Read(buf[total:length])
+			ctn.completeSocketIO()
 			ctn.totalReceived += int64(length - total)
 			if err == io.EOF && total+r == length {
 				ctn.compressed = false
@@ -309,6 +330,10 @@ func (ctn *Connection) IsConnected() bool {
 // this function is called before each read and write operation. If deadline has passed,
 // the function will return a TIMEOUT error.
 func (ctn *Connection) updateDeadline() Error {
+	if ctn.interrupted.Load() {
+		return newError(types.TIMEOUT)
+	}
+
 	now := time.Now()
 	ctn.socketDeadline = now.Add(_DEFAULT_TIMEOUT)
 	if ctn.deadline.IsZero() {
@@ -344,6 +369,42 @@ func (ctn *Connection) updateDeadline() Error {
 	}
 
 	return nil
+}
+
+func (ctn *Connection) beginSocketIO() Error {
+	if !ctn.socketState.CompareAndSwap(socketStateIdle, socketStateActive) {
+		return newError(types.TIMEOUT)
+	}
+	if ctn.interrupted.Load() {
+		ctn.completeSocketIO()
+		return newError(types.TIMEOUT)
+	}
+	return nil
+}
+
+func (ctn *Connection) completeSocketIO() bool {
+	return ctn.socketState.CompareAndSwap(socketStateActive, socketStateIdle)
+}
+
+// interruptIO wakes blocked socket I/O without releasing connection-owned buffers.
+// The command goroutine remains responsible for closing and discarding the connection.
+func (ctn *Connection) interruptIO(force bool) bool {
+	if force {
+		ctn.interrupted.Store(true)
+		ctn.socketState.Store(socketStateInterrupted)
+		if ctn.conn != nil {
+			_ = ctn.conn.SetDeadline(time.Now())
+		}
+		return true
+	}
+	if !ctn.socketState.CompareAndSwap(socketStateActive, socketStateInterrupted) {
+		return false
+	}
+	ctn.interrupted.Store(true)
+	if ctn.conn != nil {
+		_ = ctn.conn.SetDeadline(time.Now())
+	}
+	return true
 }
 
 // SetTimeout sets connection timeout for both read and write operations.
@@ -496,6 +557,8 @@ func (ctn *Connection) willBeIdleIn(tendInterval time.Duration) bool {
 
 // refresh extends the idle deadline of the connection.
 func (ctn *Connection) refresh() {
+	ctn.interrupted.Store(false)
+	ctn.socketState.Store(socketStateIdle)
 	ctn.salvageConnection = false
 	ctn.totalReceived = 0
 	now := time.Now()
