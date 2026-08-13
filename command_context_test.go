@@ -583,6 +583,31 @@ func TestExecuteAtPreservesContextAtMaxRetriesBoundary(t *testing.T) {
 	}
 }
 
+func TestExecuteAtCancellationStopsConnectionPoolAcquisitionRetries(t *testing.T) {
+	conn, _ := newStubConnection()
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := newCommandExecutionStub(ctx, conn)
+	acquisitionAttempts := 0
+	cmd.getConnHook = func(cmd *commandExecutionStub) (*Connection, Error) {
+		acquisitionAttempts++
+		if acquisitionAttempts == 10 {
+			cancel()
+		}
+		return nil, ErrConnectionPoolEmpty.err()
+	}
+
+	err := cmd.executeAt(cmd, cmd.policy, time.Time{}, -1)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+	if acquisitionAttempts != 10 {
+		t.Fatalf("expected cancellation after 10 attempts, got %d", acquisitionAttempts)
+	}
+	if cmd.putConnCalls != 0 {
+		t.Fatalf("unexpected connection return count: %d", cmd.putConnCalls)
+	}
+}
+
 func TestExecuteIterUsesEarlierContextDeadline(t *testing.T) {
 	conn, _ := newStubConnection()
 	contextDeadline := time.Now().Add(10 * time.Minute)

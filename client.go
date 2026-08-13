@@ -769,8 +769,8 @@ func (clnt *Client) GetLazy(policy *BasePolicy, key *Key, binNames ...string) (*
 // GetLazyContext is like GetLazy, but it also observes context cancellation.
 // A nil context behaves like context.Background(), and the earlier of the
 // policy deadline or context deadline bounds the command.
-// Cancellation is checked before and after connection acquisition, but does
-// not interrupt connection acquisition itself.
+// Cancellation is checked before and after every non-blocking connection-pool
+// acquisition attempt, so an exhausted pool cannot extend the context lifetime.
 // A connection interrupted by cancellation is closed and discarded rather than
 // returned to the pool with a potentially unread response.
 func (clnt *Client) GetLazyContext(ctx context.Context, policy *BasePolicy, key *Key, binNames ...string) (*Record, error) {
