@@ -243,7 +243,7 @@ func (ctn *Connection) Write(buf []byte) (total int, aerr Error) {
 	if err = ctn.updateDeadline(); err == nil {
 		if err = ctn.beginSocketIO(); err == nil {
 			total, err = ctn.conn.Write(buf)
-			ctn.finishSocketIO()
+			ctn.completeSocketIO()
 		}
 		if err == nil {
 			return total, nil
@@ -283,16 +283,17 @@ func (ctn *Connection) Read(buf []byte, length int) (total int, aerr Error) {
 
 		if !ctn.compressed {
 			r, err = ctn.conn.Read(buf[total:length])
+			ctn.completeSocketIO()
 			ctn.totalReceived += int64(r)
 		} else {
 			r, err = ctn.inflater.Read(buf[total:length])
+			ctn.completeSocketIO()
 			ctn.totalReceived += int64(length - total)
 			if err == io.EOF && total+r == length {
 				ctn.compressed = false
 				err = ctn.inflater.Close()
 			}
 		}
-		ctn.finishSocketIO()
 		total += r
 		if err != nil {
 			break
@@ -375,14 +376,14 @@ func (ctn *Connection) beginSocketIO() Error {
 		return newError(types.TIMEOUT)
 	}
 	if ctn.interrupted.Load() {
-		ctn.finishSocketIO()
+		ctn.completeSocketIO()
 		return newError(types.TIMEOUT)
 	}
 	return nil
 }
 
-func (ctn *Connection) finishSocketIO() {
-	ctn.socketState.CompareAndSwap(socketStateActive, socketStateIdle)
+func (ctn *Connection) completeSocketIO() bool {
+	return ctn.socketState.CompareAndSwap(socketStateActive, socketStateIdle)
 }
 
 // interruptIO wakes blocked socket I/O without releasing connection-owned buffers.

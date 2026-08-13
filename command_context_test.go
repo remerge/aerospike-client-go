@@ -116,7 +116,9 @@ func TestConnectionInterruptIOOnlyWhileSocketIOIsActive(t *testing.T) {
 	if !connection.interruptIO(false) {
 		t.Fatal("expected active socket I/O to be interrupted")
 	}
-	connection.finishSocketIO()
+	if connection.completeSocketIO() {
+		t.Fatal("completion should lose once interruption wins")
+	}
 	if !connection.interrupted.Load() {
 		t.Fatal("active socket interruption did not poison the connection")
 	}
@@ -127,7 +129,9 @@ func TestConnectionInterruptIOAfterSocketIOCompletesIsIgnored(t *testing.T) {
 	if err := connection.beginSocketIO(); err != nil {
 		t.Fatalf("beginSocketIO failed: %v", err)
 	}
-	connection.finishSocketIO()
+	if !connection.completeSocketIO() {
+		t.Fatal("completion should win before a late interruption")
+	}
 	if connection.interruptIO(false) {
 		t.Fatal("late interruption should not win after socket I/O completed")
 	}
