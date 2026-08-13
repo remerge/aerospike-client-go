@@ -3,7 +3,8 @@
 ## Deterministic Tests
 
 - Cancel before send and during buffer preparation and verify the clean connection returns to the pool.
-- Cancel a context while socket I/O is blocked and verify the I/O wakes promptly.
+- Cancel a context while a blocked read or final response read is in socket I/O and verify the read wakes promptly.
+- Verify interruption only wins while socket I/O is active and a late callback after completion leaves the connection reusable.
 - Stop the callback after successful work, cancel the context, and verify the connection remains usable.
 - Force a deadline race at the retry limit and verify the returned error still matches the context cause.
 - Verify iterative execution selects the earlier context deadline when a command supplies a context.

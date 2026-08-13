@@ -17,6 +17,8 @@ Context-aware reads continue to use the existing retry policy until the context 
 A context error is wrapped in an Aerospike timeout error and remains discoverable through `errors.Is`.
 Cancellation is checked immediately before and after connection acquisition.
 Connection acquisition itself is not interruptible, while subsequent blocked socket I/O is interrupted by cancellation.
+Cancellation only wins while the read or write is still active.
+A late callback after socket I/O completes must not mark the connection interrupted.
 
 ## Connection Contract
 
