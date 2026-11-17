@@ -429,7 +429,7 @@ func chainErrors(outer Error, inner error) Error {
 	return ae
 }
 
-func isConstError(err error, target *constAerospikeError) bool {
+func isExactError(err error, target *constAerospikeError) bool {
 	var ae *AerospikeError
 	if !errors.As(err, &ae) {
 		return false

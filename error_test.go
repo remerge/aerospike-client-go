@@ -148,28 +148,28 @@ var _ = gg.Describe("Aerospike Error Tests", func() {
 			exhausted := ErrConnectionPoolExhausted.err()
 			empty := ErrConnectionPoolEmpty.err()
 
-			gm.Expect(isConstError(exhausted, ErrConnectionPoolExhausted)).To(gm.BeTrue())
-			gm.Expect(isConstError(exhausted, ErrConnectionPoolEmpty)).To(gm.BeFalse())
+			gm.Expect(isExactError(exhausted, ErrConnectionPoolExhausted)).To(gm.BeTrue())
+			gm.Expect(isExactError(exhausted, ErrConnectionPoolEmpty)).To(gm.BeFalse())
 
-			gm.Expect(isConstError(empty, ErrConnectionPoolEmpty)).To(gm.BeTrue())
-			gm.Expect(isConstError(empty, ErrConnectionPoolExhausted)).To(gm.BeFalse())
+			gm.Expect(isExactError(empty, ErrConnectionPoolEmpty)).To(gm.BeTrue())
+			gm.Expect(isExactError(empty, ErrConnectionPoolExhausted)).To(gm.BeFalse())
 		})
 
 		gg.It("should not match other errors with the same result code", func() {
 			err := newError(ast.NO_AVAILABLE_CONNECTIONS_TO_NODE)
 
-			gm.Expect(isConstError(err, ErrConnectionPoolExhausted)).To(gm.BeFalse())
-			gm.Expect(isConstError(err, ErrConnectionPoolEmpty)).To(gm.BeFalse())
+			gm.Expect(isExactError(err, ErrConnectionPoolExhausted)).To(gm.BeFalse())
+			gm.Expect(isExactError(err, ErrConnectionPoolEmpty)).To(gm.BeFalse())
 		})
 
 		gg.It("should tell a node connection limit from too many opening connections", func() {
-			gm.Expect(isConstError(ErrTooManyConnectionsForNode.err(), ErrTooManyConnectionsForNode)).To(gm.BeTrue())
-			gm.Expect(isConstError(ErrTooManyOpeningConnections.err(), ErrTooManyConnectionsForNode)).To(gm.BeFalse())
+			gm.Expect(isExactError(ErrTooManyConnectionsForNode.err(), ErrTooManyConnectionsForNode)).To(gm.BeTrue())
+			gm.Expect(isExactError(ErrTooManyOpeningConnections.err(), ErrTooManyConnectionsForNode)).To(gm.BeFalse())
 		})
 
 		gg.It("should not match nil", func() {
-			gm.Expect(isConstError(nil, ErrConnectionPoolExhausted)).To(gm.BeFalse())
-			gm.Expect(isConstError(nil, ErrConnectionPoolEmpty)).To(gm.BeFalse())
+			gm.Expect(isExactError(nil, ErrConnectionPoolExhausted)).To(gm.BeFalse())
+			gm.Expect(isExactError(nil, ErrConnectionPoolEmpty)).To(gm.BeFalse())
 		})
 
 	})
