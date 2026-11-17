@@ -91,6 +91,30 @@ var _ = gg.Describe("Aerospike Node Tests", func() {
 
 			gg.Context("When ExitFastOnExhaustedConnectionPool is set", func() {
 
+				gg.It("must not exit fast when the pool is only empty", func() {
+					clientPolicy := as.NewClientPolicy()
+					clientPolicy.TlsConfig = tlsConfig
+					clientPolicy.LimitConnectionsToQueueSize = true
+					clientPolicy.ConnectionQueueSize = 4
+					clientPolicy.MinConnectionsPerNode = 0
+					clientPolicy.User = *user
+					clientPolicy.Password = *password
+					clientPolicy.UseServicesAlternate = *UseServicesAlternate
+
+					emptyPoolClient, err := as.NewClientWithPolicyAndHost(clientPolicy, dbHosts...)
+					gm.Expect(err).ToNot(gm.HaveOccurred())
+					defer emptyPoolClient.Close()
+
+					p := as.NewPolicy()
+					p.ExitFastOnExhaustedConnectionPool = true
+					p.MaxRetries = 5
+					p.TotalTimeout = 2 * time.Second
+
+					key, _ := as.NewKey(*namespace, randString(50), 5)
+					_, err = emptyPoolClient.Get(p, key)
+					gm.Expect(errors.Is(err, as.ErrKeyNotFound)).To(gm.BeTrue())
+				})
+
 				gg.It("must return appropriate error when pool is exhausted", func() {
 					clientPolicy := as.NewClientPolicy()
 					clientPolicy.TlsConfig = tlsConfig

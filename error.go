@@ -429,6 +429,11 @@ func chainErrors(outer Error, inner error) Error {
 	return ae
 }
 
+func isExactError(err error, target *constAerospikeError) bool {
+	var ae *AerospikeError
+	return errors.As(err, &ae) && ae.Is(target) && ae.msg == target.msg
+}
+
 type stackFrame struct {
 	fl, fn string
 	ln     int
