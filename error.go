@@ -397,22 +397,6 @@ var (
 
 // chainErrors wraps an error inside a new error. The new (outer) error cannot be nil.
 // if the old error is nil, the new error will be returned.
-func isConnectionPoolExhausted(err error) bool {
-	return isConstError(err, ErrConnectionPoolExhausted)
-}
-
-func isConnectionPoolEmpty(err error) bool {
-	return isConstError(err, ErrConnectionPoolEmpty)
-}
-
-func isConstError(err error, target *constAerospikeError) bool {
-	var ae *AerospikeError
-	if !errors.As(err, &ae) {
-		return false
-	}
-	return ae.ResultCode == target.ResultCode && ae.msg == target.msg
-}
-
 func chainErrors(outer Error, inner error) Error {
 	if inner == nil && outer == nil {
 		return nil
@@ -443,6 +427,22 @@ func chainErrors(outer Error, inner error) Error {
 
 	ae.wrapped = inner
 	return ae
+}
+
+func isConnectionPoolExhausted(err error) bool {
+	return isConstError(err, ErrConnectionPoolExhausted)
+}
+
+func isConnectionPoolEmpty(err error) bool {
+	return isConstError(err, ErrConnectionPoolEmpty)
+}
+
+func isConstError(err error, target *constAerospikeError) bool {
+	var ae *AerospikeError
+	if !errors.As(err, &ae) {
+		return false
+	}
+	return ae.ResultCode == target.ResultCode && ae.msg == target.msg
 }
 
 type stackFrame struct {

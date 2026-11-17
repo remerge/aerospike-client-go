@@ -572,7 +572,7 @@ func (nd *Node) getConnectionWithHint(totalTimeout, socketTimeout time.Duration,
 		err = nd.newConnectionAllowed()
 		if err == nil {
 			go nd.makeConnectionForPool(hint)
-		} else if errors.Is(err, ErrTooManyConnectionsForNode) {
+		} else if isConstError(err, ErrTooManyConnectionsForNode) {
 			return nil, ErrConnectionPoolExhausted.err()
 		}
 		return nil, ErrConnectionPoolEmpty.err()

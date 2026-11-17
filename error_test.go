@@ -162,6 +162,11 @@ var _ = gg.Describe("Aerospike Error Tests", func() {
 			gm.Expect(isConnectionPoolEmpty(err)).To(gm.BeFalse())
 		})
 
+		gg.It("should tell a node connection limit from too many opening connections", func() {
+			gm.Expect(isConstError(ErrTooManyConnectionsForNode.err(), ErrTooManyConnectionsForNode)).To(gm.BeTrue())
+			gm.Expect(isConstError(ErrTooManyOpeningConnections.err(), ErrTooManyConnectionsForNode)).To(gm.BeFalse())
+		})
+
 		gg.It("should not match nil", func() {
 			gm.Expect(isConnectionPoolExhausted(nil)).To(gm.BeFalse())
 			gm.Expect(isConnectionPoolEmpty(nil)).To(gm.BeFalse())
