@@ -142,4 +142,31 @@ var _ = gg.Describe("Aerospike Error Tests", func() {
 
 	})
 
+	gg.Context("Connection pool errors", func() {
+
+		gg.It("should tell an exhausted pool from an empty pool", func() {
+			exhausted := ErrConnectionPoolExhausted.err()
+			empty := ErrConnectionPoolEmpty.err()
+
+			gm.Expect(isConnectionPoolExhausted(exhausted)).To(gm.BeTrue())
+			gm.Expect(isConnectionPoolEmpty(exhausted)).To(gm.BeFalse())
+
+			gm.Expect(isConnectionPoolEmpty(empty)).To(gm.BeTrue())
+			gm.Expect(isConnectionPoolExhausted(empty)).To(gm.BeFalse())
+		})
+
+		gg.It("should not match other errors with the same result code", func() {
+			err := newError(ast.NO_AVAILABLE_CONNECTIONS_TO_NODE)
+
+			gm.Expect(isConnectionPoolExhausted(err)).To(gm.BeFalse())
+			gm.Expect(isConnectionPoolEmpty(err)).To(gm.BeFalse())
+		})
+
+		gg.It("should not match nil", func() {
+			gm.Expect(isConnectionPoolExhausted(nil)).To(gm.BeFalse())
+			gm.Expect(isConnectionPoolEmpty(nil)).To(gm.BeFalse())
+		})
+
+	})
+
 }) // Describe
