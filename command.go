@@ -3788,12 +3788,12 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 			applyTransactionErrorMetrics(cmd.node)
 
 			// exit immediately if connection pool is exhausted and the corresponding policy option is set
-			if policy.ExitFastOnExhaustedConnectionPool && isConnectionPoolExhausted(err) {
+			if policy.ExitFastOnExhaustedConnectionPool && isConstError(err, ErrConnectionPoolExhausted) {
 				break
 			}
 
-			if isConnectionPoolEmpty(err) || isConnectionPoolExhausted(err) {
-				if isConnectionPoolExhausted(err) || (isConnectionPoolEmpty(err) && loopCount == 1) {
+			if isConstError(err, ErrConnectionPoolEmpty) || isConstError(err, ErrConnectionPoolExhausted) {
+				if isConstError(err, ErrConnectionPoolExhausted) || (isConstError(err, ErrConnectionPoolEmpty) && loopCount == 1) {
 					isClientTimeout = true
 				}
 				// if the connection pool is empty, we still haven't tried

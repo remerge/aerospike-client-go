@@ -429,14 +429,6 @@ func chainErrors(outer Error, inner error) Error {
 	return ae
 }
 
-func isConnectionPoolExhausted(err error) bool {
-	return isConstError(err, ErrConnectionPoolExhausted)
-}
-
-func isConnectionPoolEmpty(err error) bool {
-	return isConstError(err, ErrConnectionPoolEmpty)
-}
-
 func isConstError(err error, target *constAerospikeError) bool {
 	var ae *AerospikeError
 	if !errors.As(err, &ae) {
