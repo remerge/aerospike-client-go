@@ -431,10 +431,7 @@ func chainErrors(outer Error, inner error) Error {
 
 func isExactError(err error, target *constAerospikeError) bool {
 	var ae *AerospikeError
-	if !errors.As(err, &ae) {
-		return false
-	}
-	return ae.ResultCode == target.ResultCode && ae.msg == target.msg
+	return errors.As(err, &ae) && ae.Is(target) && ae.msg == target.msg
 }
 
 type stackFrame struct {
