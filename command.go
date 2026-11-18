@@ -3771,23 +3771,15 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 			continue
 		}
 
-		// A connection acquired after retries must use the command's remaining
-		// budget, not a fresh TotalTimeout for its socket operations.
-		connectionPolicy := *policy
-		if !deadline.IsZero() {
-			connectionPolicy.TotalTimeout = time.Until(deadline)
-			if connectionPolicy.TotalTimeout <= 0 {
-				break
-			}
-		}
-
+		// CONTROL BUILD: the remaining-timeout fix is intentionally disabled so
+		// a divert can be compared against one that has it. Metrics stay on.
 		if metricsEnabled {
 			start := time.Now()
-			cmd.conn, err = ifc.getConnection(&connectionPolicy)
+			cmd.conn, err = ifc.getConnection(policy)
 			// Capture connection acquire time.
 			cmd.applyDetailedMetricsConnectionAq(ifc, start)
 		} else {
-			cmd.conn, err = ifc.getConnection(&connectionPolicy)
+			cmd.conn, err = ifc.getConnection(policy)
 		}
 
 		if err != nil {
