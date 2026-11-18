@@ -3770,13 +3770,23 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 			continue
 		}
 
+		// A connection acquired after retries must use the command's remaining
+		// budget, not a fresh TotalTimeout for its socket operations.
+		connectionPolicy := *policy
+		if !deadline.IsZero() {
+			connectionPolicy.TotalTimeout = time.Until(deadline)
+			if connectionPolicy.TotalTimeout <= 0 {
+				break
+			}
+		}
+
 		if metricsEnabled {
 			start := time.Now()
-			cmd.conn, err = ifc.getConnection(policy)
+			cmd.conn, err = ifc.getConnection(&connectionPolicy)
 			// Capture connection acquire time.
 			cmd.applyDetailedMetricsConnectionAq(ifc, start)
 		} else {
-			cmd.conn, err = ifc.getConnection(policy)
+			cmd.conn, err = ifc.getConnection(&connectionPolicy)
 		}
 
 		if err != nil {
