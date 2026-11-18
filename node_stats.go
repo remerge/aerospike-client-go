@@ -76,6 +76,9 @@ type nodeStats struct {
 	TransactionRetryCount iatomic.Int `json:"transaction-retry-count"`
 	// Total number of command errors
 	TransactionErrorCount iatomic.Int `json:"transaction-error-count"`
+	// Socket attempts and timeouts after a pool wait, with a finite command deadline.
+	DeadlinePoolWaitSocketAttempts iatomic.Int `json:"deadline-pool-wait-socket-attempts"`
+	DeadlinePoolWaitSocketTimeouts iatomic.Int `json:"deadline-pool-wait-socket-timeouts"`
 	// Total number of connections recovered from the pool
 	ConnectionsRecovered iatomic.Int `json:"connections-recovered"`
 	// Metrics for Get commands
@@ -196,8 +199,10 @@ func (ns *nodeStats) getAndReset() *nodeStats {
 		NodeAdded:                ns.NodeAdded.CloneAndSet(0),
 		NodeRemoved:              ns.NodeRemoved.CloneAndSet(0),
 
-		TransactionRetryCount: ns.TransactionRetryCount.CloneAndSet(0),
-		TransactionErrorCount: ns.TransactionErrorCount.CloneAndSet(0),
+		TransactionRetryCount:          ns.TransactionRetryCount.CloneAndSet(0),
+		TransactionErrorCount:          ns.TransactionErrorCount.CloneAndSet(0),
+		DeadlinePoolWaitSocketAttempts: ns.DeadlinePoolWaitSocketAttempts.CloneAndSet(0),
+		DeadlinePoolWaitSocketTimeouts: ns.DeadlinePoolWaitSocketTimeouts.CloneAndSet(0),
 
 		GetMetrics:               *ns.GetMetrics.CloneAndReset(),
 		GetHeaderMetrics:         *ns.GetHeaderMetrics.CloneAndReset(),
@@ -243,8 +248,10 @@ func (ns *nodeStats) clone() nodeStats {
 		NodeAdded:                ns.NodeAdded.Clone(),
 		NodeRemoved:              ns.NodeRemoved.Clone(),
 
-		TransactionRetryCount: ns.TransactionRetryCount.Clone(),
-		TransactionErrorCount: ns.TransactionErrorCount.Clone(),
+		TransactionRetryCount:          ns.TransactionRetryCount.Clone(),
+		TransactionErrorCount:          ns.TransactionErrorCount.Clone(),
+		DeadlinePoolWaitSocketAttempts: ns.DeadlinePoolWaitSocketAttempts.Clone(),
+		DeadlinePoolWaitSocketTimeouts: ns.DeadlinePoolWaitSocketTimeouts.Clone(),
 
 		GetMetrics:               *ns.GetMetrics.Clone(),
 		GetHeaderMetrics:         *ns.GetHeaderMetrics.Clone(),
@@ -311,6 +318,8 @@ func (ns *nodeStats) aggregate(newStats *nodeStats) {
 
 	ns.TransactionRetryCount.AddAndGet(newStats.TransactionRetryCount.Get())
 	ns.TransactionErrorCount.AddAndGet(newStats.TransactionErrorCount.Get())
+	ns.DeadlinePoolWaitSocketAttempts.AddAndGet(newStats.DeadlinePoolWaitSocketAttempts.Get())
+	ns.DeadlinePoolWaitSocketTimeouts.AddAndGet(newStats.DeadlinePoolWaitSocketTimeouts.Get())
 
 	ns.GetMetrics.Merge(&newStats.GetMetrics)
 	ns.GetHeaderMetrics.Merge(&newStats.GetHeaderMetrics)
@@ -332,40 +341,42 @@ func (ns *nodeStats) aggregate(newStats *nodeStats) {
 
 func (ns nodeStats) MarshalJSON() ([]byte, error) {
 	return json.Marshal(&struct {
-		StatsLabels              []map[string]string                  `json:"labels,omitempty"`
-		ConnectionsAttempts      int                                  `json:"connections-attempts"`
-		ConnectionsSuccessful    int                                  `json:"connections-successful"`
-		ConnectionsFailed        int                                  `json:"connections-failed"`
-		ConnectionsTimeoutErrors int                                  `json:"connections-error-timeout"`
-		ConnectionsOtherErrors   int                                  `json:"connections-error-other"`
-		CircuitBreakerHits       int                                  `json:"circuit-breaker-hits"`
-		ConnectionsPoolEmpty     int                                  `json:"connections-pool-empty"`
-		ConnectionsPoolOverflow  int                                  `json:"connections-pool-overflow"`
-		ConnectionsIdleDropped   int                                  `json:"connections-idle-dropped"`
-		ConnectionsOpen          int                                  `json:"open-connections"`
-		ConnectionsClosed        int                                  `json:"closed-connections"`
-		ConnectionsRecovered     int                                  `json:"connections-recovered"`
-		TendsTotal               int                                  `json:"tends-total"`
-		TendsSuccessful          int                                  `json:"tends-successful"`
-		TendsFailed              int                                  `json:"tends-failed"`
-		PartitionMapUpdates      int                                  `json:"partition-map-updates"`
-		NodeAdded                int                                  `json:"node-added-count"`
-		NodeRemoved              int                                  `json:"node-removed-count"`
-		RetryCount               int                                  `json:"transaction-retry-count"`
-		ErrorCount               int                                  `json:"transaction-error-count"`
-		GetMetrics               hist.SyncHistogram[uint64]           `json:"get-metrics"`
-		GetHeaderMetrics         hist.SyncHistogram[uint64]           `json:"get-header-metrics"`
-		ExistsMetrics            hist.SyncHistogram[uint64]           `json:"exists-metrics"`
-		PutMetrics               hist.SyncHistogram[uint64]           `json:"put-metrics"`
-		DeleteMetrics            hist.SyncHistogram[uint64]           `json:"delete-metrics"`
-		OperateMetrics           hist.SyncHistogram[uint64]           `json:"operate-metrics"`
-		QueryMetrics             hist.SyncHistogram[uint64]           `json:"query-metrics"`
-		ScanMetrics              hist.SyncHistogram[uint64]           `json:"scan-metrics"`
-		UDFMetrics               hist.SyncHistogram[uint64]           `json:"udf-metrics"`
-		BatchReadMetrics         hist.SyncHistogram[uint64]           `json:"batch-read-metrics"`
-		BatchWriteMetrics        hist.SyncHistogram[uint64]           `json:"batch-write-metrics"`
-		ErrorCounts              map[string]map[string]map[string]int `json:"detailed-resultcode-counts"`
-		DetailedMetrics          map[string]map[string]*commandMetric `json:"detailed-metrics"`
+		StatsLabels                    []map[string]string                  `json:"labels,omitempty"`
+		ConnectionsAttempts            int                                  `json:"connections-attempts"`
+		ConnectionsSuccessful          int                                  `json:"connections-successful"`
+		ConnectionsFailed              int                                  `json:"connections-failed"`
+		ConnectionsTimeoutErrors       int                                  `json:"connections-error-timeout"`
+		ConnectionsOtherErrors         int                                  `json:"connections-error-other"`
+		CircuitBreakerHits             int                                  `json:"circuit-breaker-hits"`
+		ConnectionsPoolEmpty           int                                  `json:"connections-pool-empty"`
+		ConnectionsPoolOverflow        int                                  `json:"connections-pool-overflow"`
+		ConnectionsIdleDropped         int                                  `json:"connections-idle-dropped"`
+		ConnectionsOpen                int                                  `json:"open-connections"`
+		ConnectionsClosed              int                                  `json:"closed-connections"`
+		ConnectionsRecovered           int                                  `json:"connections-recovered"`
+		TendsTotal                     int                                  `json:"tends-total"`
+		TendsSuccessful                int                                  `json:"tends-successful"`
+		TendsFailed                    int                                  `json:"tends-failed"`
+		PartitionMapUpdates            int                                  `json:"partition-map-updates"`
+		NodeAdded                      int                                  `json:"node-added-count"`
+		NodeRemoved                    int                                  `json:"node-removed-count"`
+		RetryCount                     int                                  `json:"transaction-retry-count"`
+		ErrorCount                     int                                  `json:"transaction-error-count"`
+		DeadlinePoolWaitSocketAttempts int                                  `json:"deadline-pool-wait-socket-attempts"`
+		DeadlinePoolWaitSocketTimeouts int                                  `json:"deadline-pool-wait-socket-timeouts"`
+		GetMetrics                     hist.SyncHistogram[uint64]           `json:"get-metrics"`
+		GetHeaderMetrics               hist.SyncHistogram[uint64]           `json:"get-header-metrics"`
+		ExistsMetrics                  hist.SyncHistogram[uint64]           `json:"exists-metrics"`
+		PutMetrics                     hist.SyncHistogram[uint64]           `json:"put-metrics"`
+		DeleteMetrics                  hist.SyncHistogram[uint64]           `json:"delete-metrics"`
+		OperateMetrics                 hist.SyncHistogram[uint64]           `json:"operate-metrics"`
+		QueryMetrics                   hist.SyncHistogram[uint64]           `json:"query-metrics"`
+		ScanMetrics                    hist.SyncHistogram[uint64]           `json:"scan-metrics"`
+		UDFMetrics                     hist.SyncHistogram[uint64]           `json:"udf-metrics"`
+		BatchReadMetrics               hist.SyncHistogram[uint64]           `json:"batch-read-metrics"`
+		BatchWriteMetrics              hist.SyncHistogram[uint64]           `json:"batch-write-metrics"`
+		ErrorCounts                    map[string]map[string]map[string]int `json:"detailed-resultcode-counts"`
+		DetailedMetrics                map[string]map[string]*commandMetric `json:"detailed-metrics"`
 	}{
 		*ns.StatLabels,
 		ns.ConnectionsAttempts.Get(),
@@ -389,6 +400,8 @@ func (ns nodeStats) MarshalJSON() ([]byte, error) {
 
 		ns.TransactionRetryCount.Get(),
 		ns.TransactionErrorCount.Get(),
+		ns.DeadlinePoolWaitSocketAttempts.Get(),
+		ns.DeadlinePoolWaitSocketTimeouts.Get(),
 
 		ns.GetMetrics,
 		ns.GetHeaderMetrics,

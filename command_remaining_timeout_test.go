@@ -1,6 +1,7 @@
 package aerospike
 
 import (
+	"encoding/json"
 	"io"
 	"net"
 	"testing"
@@ -65,6 +66,28 @@ func TestCommandPoolWaitAndSocketReadShareDeadline(t *testing.T) {
 	}
 	if elapsed > 280*time.Millisecond {
 		t.Fatalf("pool wait and socket read took %s, exceeding the 200ms budget", elapsed)
+	}
+	if got := node.stats.DeadlinePoolWaitSocketAttempts.Get(); got != 1 {
+		t.Fatalf("pool-wait socket attempts = %d, want 1", got)
+	}
+	if got := node.stats.DeadlinePoolWaitSocketTimeouts.Get(); got != 1 {
+		t.Fatalf("pool-wait socket timeouts = %d, want 1", got)
+	}
+	aggregated := newNodeStats(DefaultMetricsPolicy())
+	aggregated.aggregate(node.stats.getAndReset())
+	cloned := aggregated.clone()
+	encoded, marshalErr := json.Marshal(cloned)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	var values map[string]any
+	if unmarshalErr := json.Unmarshal(encoded, &values); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
+	}
+	for _, key := range []string{"deadline-pool-wait-socket-attempts", "deadline-pool-wait-socket-timeouts"} {
+		if values[key] != float64(1) {
+			t.Fatalf("exported %s = %v, want 1", key, values[key])
+		}
 	}
 }
 

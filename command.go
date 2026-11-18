@@ -3678,6 +3678,7 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 	notFirstIteration := false
 	isClientTimeout := false
 	loopCount := 0
+	waitedForPool := false
 
 	var err Error
 	// Execute command until successful, timed out or maximum iterations have been reached.
@@ -3803,6 +3804,7 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 			}
 
 			if errors.Is(err, ErrConnectionPoolEmpty) || errors.Is(err, ErrConnectionPoolExhausted) {
+				waitedForPool = true
 				if errors.Is(err, ErrConnectionPoolExhausted) || (errors.Is(err, ErrConnectionPoolEmpty) && loopCount == 1) {
 					isClientTimeout = true
 				}
@@ -3812,6 +3814,10 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 			}
 			logger.Logger.Debug("Node %s: %s", cmd.node.String(), err.Error())
 			continue
+		}
+		measuredPoolWait := waitedForPool && !deadline.IsZero()
+		if measuredPoolWait {
+			cmd.node.stats.DeadlinePoolWaitSocketAttempts.GetAndIncrement()
 		}
 
 		// Assign the connection buffer to the command buffer
@@ -3866,6 +3872,9 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 
 		if err != nil {
 			applyTransactionErrorMetrics(cmd.node)
+			if measuredPoolWait && errors.Is(err, ErrTimeout) {
+				cmd.node.stats.DeadlinePoolWaitSocketTimeouts.GetAndIncrement()
+			}
 
 			// chain the errors
 			errChain = chainErrors(err, errChain).iter(cmd.commandSentCounter).setNode(cmd.node).setInDoubt(ifc.isRead(), cmd.commandSentCounter)
@@ -3909,6 +3918,9 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 
 			if networkError(err) {
 				isTimeout := errors.Is(err, ErrTimeout)
+				if measuredPoolWait && isTimeout {
+					cmd.node.stats.DeadlinePoolWaitSocketTimeouts.GetAndIncrement()
+				}
 				isClientTimeout = isTimeout
 				if !isTimeout {
 					if deviceOverloadError(err) {
