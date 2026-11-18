@@ -1,6 +1,8 @@
 package aerospike
 
 import (
+	"io"
+	"net"
 	"testing"
 	"time"
 )
@@ -11,6 +13,59 @@ type deadlineProbeCommand struct {
 	fakeCommand
 	node     *Node
 	timeouts []time.Duration
+}
+
+type deadlineSocketCommand struct {
+	deadlineProbeCommand
+	peer net.Conn
+}
+
+func (c *deadlineSocketCommand) getConnection(policy Policy) (*Connection, Error) {
+	if len(c.timeouts) == 0 {
+		c.timeouts = append(c.timeouts, policy.GetBasePolicy().TotalTimeout)
+		time.Sleep(120 * time.Millisecond)
+		return nil, ErrConnectionPoolEmpty.err()
+	}
+	client, peer := net.Pipe()
+	c.peer = peer
+	go func() { _, _ = io.Copy(io.Discard, peer) }()
+	buffer := make([]byte, 64)
+	conn := &Connection{conn: client, dataBuffer: buffer, origDataBuffer: buffer}
+	_ = conn.setTimeout(policy.GetBasePolicy().TotalTimeout, policy.GetBasePolicy().SocketTimeout)
+	return conn, nil
+}
+
+func (c *deadlineSocketCommand) writeBuffer(command) Error {
+	c.dataOffset = 30
+	return nil
+}
+
+func (c *deadlineSocketCommand) parseResult(_ command, conn *Connection) Error {
+	_, err := conn.Read(make([]byte, 1), 1)
+	return err
+}
+
+func TestCommandPoolWaitAndSocketReadShareDeadline(t *testing.T) {
+	cluster := &Cluster{}
+	node := &Node{cluster: cluster, host: NewHost("127.0.0.1", 3000), stats: *newNodeStats(DefaultMetricsPolicy())}
+	node.active.Set(true)
+	cmd := &deadlineSocketCommand{deadlineProbeCommand: deadlineProbeCommand{node: node}}
+	policy := NewPolicy()
+	policy.TotalTimeout = 200 * time.Millisecond
+	policy.MaxRetries = 0
+	policy.SleepBetweenRetries = 0
+	start := time.Now()
+	err := cmd.baseCommand.executeAt(cmd, policy, start.Add(policy.TotalTimeout), -1)
+	elapsed := time.Since(start)
+	if cmd.peer != nil {
+		_ = cmd.peer.Close()
+	}
+	if err == nil {
+		t.Fatal("expected a timeout waiting for the response")
+	}
+	if elapsed > 280*time.Millisecond {
+		t.Fatalf("pool wait and socket read took %s, exceeding the 200ms budget", elapsed)
+	}
 }
 
 func (c *deadlineProbeCommand) getNode(command) (*Node, Error) { return c.node, nil }
