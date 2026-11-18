@@ -47,7 +47,14 @@ func (c *deadlineSocketCommand) parseResult(_ command, conn *Connection) Error {
 }
 
 func TestCommandPoolWaitAndSocketReadShareDeadline(t *testing.T) {
+	t.Run("detailed metrics disabled", func(t *testing.T) { testCommandPoolWaitAndSocketRead(t, false) })
+	t.Run("detailed metrics enabled", func(t *testing.T) { testCommandPoolWaitAndSocketRead(t, true) })
+}
+
+func testCommandPoolWaitAndSocketRead(t *testing.T, detailedMetrics bool) {
+	t.Helper()
 	cluster := &Cluster{}
+	cluster.metricsEnabled.Store(detailedMetrics)
 	node := &Node{cluster: cluster, host: NewHost("127.0.0.1", 3000), stats: *newNodeStats(DefaultMetricsPolicy())}
 	node.active.Set(true)
 	cmd := &deadlineSocketCommand{deadlineProbeCommand: deadlineProbeCommand{node: node}}
