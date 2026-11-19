@@ -67,6 +67,7 @@ type Connection struct {
 	// timeouts
 	socketTimeout  time.Duration
 	deadline       time.Time
+	strictDeadline bool
 	socketDeadline time.Time // this is not strictly required, but is used in testing
 
 	// duration after which connection is considered idle
@@ -119,7 +120,7 @@ func errToAerospikeErr(conn *Connection, err error) (aerr Error) {
 	if terr, ok := err.(net.Error); ok {
 		if terr.Timeout() {
 			if conn != nil {
-			 	if conn.node != nil {
+				if conn.node != nil {
 					conn.node.stats.ConnectionsTimeoutErrors.IncrementAndGet()
 				}
 				if errors.Is(terr, os.ErrDeadlineExceeded) {
@@ -317,6 +318,7 @@ func (ctn *Connection) updateDeadline() Error {
 		}
 	} else {
 		if !ctn.deadline.IsZero() && now.After(ctn.deadline) {
+			ctn.socketDeadline = ctn.deadline
 			return newError(types.TIMEOUT)
 		}
 		if ctn.socketTimeout <= 0 {
@@ -331,7 +333,7 @@ func (ctn *Connection) updateDeadline() Error {
 		}
 
 		// floor to a millisecond to avoid too short timeouts
-		if ctn.socketDeadline.Sub(now) < time.Millisecond {
+		if !ctn.strictDeadline && ctn.socketDeadline.Sub(now) < time.Millisecond {
 			ctn.socketDeadline = now.Add(time.Millisecond)
 		}
 	}
@@ -360,6 +362,7 @@ func (ctn *Connection) SetTimeout(deadline time.Time, socketTimeout time.Duratio
 	now := time.Now()
 	ctn.socketTimeout = _DEFAULT_TIMEOUT
 	ctn.deadline = time.Time{}
+	ctn.strictDeadline = false
 
 	if socketTimeout > 0 {
 		ctn.socketTimeout = socketTimeout

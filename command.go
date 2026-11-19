@@ -3674,6 +3674,17 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 	// for exponential backoff
 	interval := policy.SleepBetweenRetries
 	transStart := time.Now()
+	observeDeadline := policy.ObserveDeadline
+	if policy.Deadline.IsZero() {
+		observeDeadline = nil
+	}
+	requestDeadlineSelected := !policy.Deadline.IsZero() && deadline.Equal(policy.Deadline)
+	if observeDeadline != nil {
+		observeDeadline(DeadlineCommandStarted)
+		if requestDeadlineSelected {
+			observeDeadline(DeadlineSelected)
+		}
+	}
 
 	notFirstIteration := false
 	isClientTimeout := false
@@ -3683,11 +3694,20 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 	var err Error
 	// Execute command until successful, timed out or maximum iterations have been reached.
 	for {
+		if !policy.Deadline.IsZero() && !time.Now().Before(deadline) {
+			if observeDeadline != nil && requestDeadlineSelected && cmd.commandSentCounter == 0 {
+				observeDeadline(DeadlineExpiredBeforeIO)
+			}
+			break
+		}
 		cmd.commandSentCounter++
 		loopCount++
 
 		// too many retries
 		if (policy.MaxRetries <= 0 && cmd.commandSentCounter > 1) || (policy.MaxRetries > 0 && cmd.commandSentCounter > policy.MaxRetries) {
+			if observeDeadline != nil && policy.MaxRetries == 0 {
+				observeDeadline(DeadlineRetrySuppressed)
+			}
 			if cmd.node != nil && cmd.node.cluster != nil {
 				cmd.node.cluster.maxRetriesExceededCount.GetAndIncrement()
 			}
@@ -3698,7 +3718,7 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 		// Sleep before trying again, after the first iteration
 		if policy.SleepBetweenRetries > 0 && notFirstIteration {
 			// Do not sleep if you know you'll wake up after the deadline
-			if policy.TotalTimeout > 0 && time.Now().Add(interval).After(deadline) {
+			if !deadline.IsZero() && time.Now().Add(interval).After(deadline) {
 				break
 			}
 
@@ -3739,7 +3759,10 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 		notFirstIteration = true
 
 		// check for command timeout
-		if policy.TotalTimeout > 0 && time.Now().After(deadline) {
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			if observeDeadline != nil && requestDeadlineSelected && cmd.commandSentCounter == 1 {
+				observeDeadline(DeadlineExpiredBeforeIO)
+			}
 			break
 		}
 		// set command node, so when you return a record it has the node
@@ -3777,7 +3800,13 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 		if !deadline.IsZero() {
 			connectionPolicy.TotalTimeout = time.Until(deadline)
 			if connectionPolicy.TotalTimeout <= 0 {
+				if observeDeadline != nil && requestDeadlineSelected && cmd.commandSentCounter == 1 {
+					observeDeadline(DeadlineExpiredBeforeIO)
+				}
 				break
+			}
+			if !policy.Deadline.IsZero() {
+				connectionPolicy.Deadline = deadline
 			}
 		}
 
@@ -3800,6 +3829,9 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 
 			// exit immediately if connection pool is exhausted and the corresponding policy option is set
 			if policy.ExitFastOnExhaustedConnectionPool && errors.Is(err, ErrConnectionPoolExhausted) {
+				if observeDeadline != nil {
+					observeDeadline(DeadlinePoolFailedFast)
+				}
 				break
 			}
 
@@ -3872,6 +3904,9 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 
 		if err != nil {
 			applyTransactionErrorMetrics(cmd.node)
+			if observeDeadline != nil && requestDeadlineSelected && errors.Is(err, ErrTimeout) && cmd.conn.socketDeadline.Equal(deadline) && !time.Now().Before(deadline) {
+				observeDeadline(DeadlineSocketTimedOut)
+			}
 			if measuredPoolWait && errors.Is(err, ErrTimeout) {
 				cmd.node.stats.DeadlinePoolWaitSocketTimeouts.GetAndIncrement()
 			}
@@ -3918,6 +3953,9 @@ func (cmd *baseCommand) executeAt(ifc command, policy *BasePolicy, deadline time
 
 			if networkError(err) {
 				isTimeout := errors.Is(err, ErrTimeout)
+				if observeDeadline != nil && requestDeadlineSelected && isTimeout && cmd.conn.socketDeadline.Equal(deadline) && !time.Now().Before(deadline) {
+					observeDeadline(DeadlineSocketTimedOut)
+				}
 				if measuredPoolWait && isTimeout {
 					cmd.node.stats.DeadlinePoolWaitSocketTimeouts.GetAndIncrement()
 				}

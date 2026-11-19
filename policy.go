@@ -32,6 +32,18 @@ type Policy interface {
 // enforce the interface
 var _ Policy = &BasePolicy{}
 
+// DeadlineEvent identifies an execution point of a deadline-bound command.
+type DeadlineEvent uint8
+
+const (
+	DeadlineCommandStarted DeadlineEvent = iota
+	DeadlineSelected
+	DeadlineExpiredBeforeIO
+	DeadlineSocketTimedOut
+	DeadlinePoolFailedFast
+	DeadlineRetrySuppressed
+)
+
 // BasePolicy encapsulates parameters for command policy attributes
 // used in all database operation calls.
 type BasePolicy struct {
@@ -65,6 +77,15 @@ type BasePolicy struct {
 	//
 	// Default for all other commands: 1000ms
 	TotalTimeout time.Duration
+
+	// Deadline is an optional absolute upper bound shared by all commands that
+	// use this policy, including the workers of a batch. TotalTimeout still
+	// applies when it expires sooner. A zero Deadline adds no bound.
+	Deadline time.Time
+
+	// ObserveDeadline reports enforcement events for commands with a Deadline.
+	// Batch workers can call it concurrently. The callback must not block.
+	ObserveDeadline func(DeadlineEvent)
 
 	// SocketTimeout determines network timeout for each attempt.
 	//
@@ -201,11 +222,16 @@ var _ Policy = &BasePolicy{}
 func (bp *BasePolicy) GetBasePolicy() *BasePolicy { return bp }
 
 func (bp *BasePolicy) deadline() time.Time {
-	var deadline time.Time
-	if bp != nil && bp.TotalTimeout > 0 {
-		deadline = time.Now().Add(bp.TotalTimeout)
+	if bp == nil {
+		return time.Time{}
 	}
-
+	deadline := bp.Deadline
+	if bp.TotalTimeout > 0 {
+		timeoutDeadline := time.Now().Add(bp.TotalTimeout)
+		if deadline.IsZero() || timeoutDeadline.Before(deadline) {
+			deadline = timeoutDeadline
+		}
+	}
 	return deadline
 }
 

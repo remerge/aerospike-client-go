@@ -115,7 +115,8 @@ func (cmd *baseMultiCommand) prepareRetry(ifc command, isTimeout bool) bool {
 }
 
 func (cmd *baseMultiCommand) getConnection(policy Policy) (*Connection, Error) {
-	return cmd.node.getConnectionWithHint(policy.GetBasePolicy().TotalTimeout, policy.GetBasePolicy().SocketTimeout, byte(rand.Int63()&0xff), policy.GetBasePolicy().TimeoutDelay)
+	bp := policy.GetBasePolicy()
+	return cmd.node.getConnectionWithHint(bp.TotalTimeout, bp.SocketTimeout, bp.Deadline, byte(rand.Int63()&0xff), bp.TimeoutDelay)
 }
 
 func (cmd *baseMultiCommand) putConnection(conn *Connection) {
